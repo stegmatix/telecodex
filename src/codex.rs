@@ -1,6 +1,6 @@
 use crate::{
     config::SearchMode,
-    limits::LimitsSnapshot,
+    limits::{LimitsSnapshot, default_codex_home},
     models::{SessionRecord, TurnRequest},
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
+    fs,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -160,6 +161,12 @@ impl CodexRunner {
             .map(|review| build_review_command(&self.binary, session, request, review))
     }
     pub async fn auth_status(&self) -> Result<CodexAuthStatus> {
+        if has_api_key_auth(&default_codex_home())? {
+            return Ok(CodexAuthStatus {
+                authenticated: true,
+                detail: "Using API key authentication.".to_string(),
+            });
+        }
         let output = run_simple_command_capture(&self.binary, &["login", "status"]).await?;
         interpret_auth_status(output)
     }
@@ -817,6 +824,30 @@ fn interpret_auth_status(output: SimpleCommandOutput) -> Result<CodexAuthStatus>
         bail!("failed to read Codex login status");
     }
     bail!("{}", output.message)
+}
+
+fn has_api_key_auth(codex_home: &Path) -> Result<bool> {
+    if std::env::var("OPENAI_API_KEY")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(true);
+    }
+
+    let auth_path = codex_home.join("auth.json");
+    if !auth_path.is_file() {
+        return Ok(false);
+    }
+
+    let raw = fs::read_to_string(&auth_path)
+        .with_context(|| format!("failed to read {}", auth_path.display()))?;
+    let json: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse {}", auth_path.display()))?;
+    Ok(json
+        .get("OPENAI_API_KEY")
+        .and_then(Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false))
 }
 
 fn append_output_line(buffer: &mut String, line: &str) {

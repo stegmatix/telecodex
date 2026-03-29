@@ -47,6 +47,10 @@ struct EventPayload {
 }
 
 pub fn default_codex_home() -> PathBuf {
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        return PathBuf::from(codex_home);
+    }
+
     #[cfg(windows)]
     if let Some(user_profile) = std::env::var_os("USERPROFILE") {
         return PathBuf::from(user_profile).join(".codex");
