@@ -1,4 +1,5 @@
 use std::{error::Error, fmt};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
@@ -11,6 +12,11 @@ pub struct TelegramClient {
     token: String,
     api_base: String,
 }
+
+const TELEGRAM_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const TELEGRAM_GET_UPDATES_GRACE: Duration = Duration::from_secs(15);
+const TELEGRAM_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const TELEGRAM_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl TelegramClient {
     pub fn new(token: String, api_base: String) -> Self {
@@ -33,13 +39,14 @@ impl TelegramClient {
             allowed_updates: Vec<&'static str>,
         }
 
-        self.post(
+        self.post_with_timeout(
             "getUpdates",
             Some(&Payload {
                 offset,
                 timeout,
                 allowed_updates: vec!["message", "callback_query"],
             }),
+            Duration::from_secs(timeout as u64).saturating_add(TELEGRAM_GET_UPDATES_GRACE),
         )
         .await
     }
@@ -285,6 +292,7 @@ impl TelegramClient {
         let response = self
             .http
             .get(url)
+            .timeout(TELEGRAM_DOWNLOAD_TIMEOUT)
             .send()
             .await
             .context("telegram getFile download failed")?;
@@ -300,11 +308,26 @@ impl TelegramClient {
         T: Serialize + ?Sized,
         R: DeserializeOwned,
     {
+        self.post_with_timeout(method, payload, TELEGRAM_REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn post_with_timeout<T, R>(
+        &self,
+        method: &str,
+        payload: Option<&T>,
+        timeout: Duration,
+    ) -> Result<R>
+    where
+        T: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
         let url = format!("{}/bot{}/{}", self.api_base, self.token, method);
         let mut request = self.http.post(url);
         if let Some(payload) = payload {
             request = request.json(payload);
         }
+        request = request.timeout(timeout);
 
         let response = request
             .send()
@@ -395,6 +418,7 @@ impl TelegramClient {
             .http
             .post(url)
             .multipart(form)
+            .timeout(TELEGRAM_UPLOAD_TIMEOUT)
             .send()
             .await
             .with_context(|| format!("telegram {method} multipart request failed"))?;

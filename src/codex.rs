@@ -387,6 +387,7 @@ where
     let mut turn_error: Option<String> = None;
     let mut cancelled = false;
     let mut turn_completed = false;
+    let mut assistant_message_completed = false;
     while !turn_completed {
         tokio::select! {
           _=cancel.cancelled(), if !interrupt_sent => {
@@ -400,7 +401,7 @@ where
                 if id==turn_request_id{if let Some(error)=error{turn_error=Some(format_rpc_error(&error)); break;} if let Some(turn_id)=result.as_ref().and_then(|v|v.get("turn")).and_then(|t|t.get("id")).and_then(Value::as_str){active_turn_id=Some(turn_id.to_string());}}
                 else if error.is_some() && interrupt_sent {turn_error=Some(format!("turn/interrupt failed: {}",format_rpc_error(error.as_ref().expect("interrupt error missing")))); break;}
               }
-              RpcMessage::Notification{method,params}=>{handle_notification(&method,&params,&mut summary,&mut active_turn_id,&mut turn_error,&mut turn_completed,on_event).await?;}
+              RpcMessage::Notification{method,params}=>{handle_notification(&method,&params,&mut summary,&mut active_turn_id,&mut turn_error,&mut turn_completed,&mut assistant_message_completed,on_event).await?;}
                 RpcMessage::ServerRequest{id,method,params}=>{handle_server_request(&mut process,id,&method,&params,on_event).await?;}
             }
           }
@@ -423,6 +424,7 @@ async fn handle_notification<F, Fut>(
     active_turn_id: &mut Option<String>,
     turn_error: &mut Option<String>,
     turn_completed: &mut bool,
+    assistant_message_completed: &mut bool,
     on_event: &mut F,
 ) -> Result<()>
 where
@@ -447,6 +449,7 @@ where
                 .and_then(Value::as_str)
             {
                 *active_turn_id = Some(turn_id.to_string());
+                *assistant_message_completed = false;
             }
         }
         "turn/completed" => {
@@ -466,6 +469,21 @@ where
                 } else if status == "interrupted" {
                     *turn_error = Some("codex turn cancelled".to_string());
                 }
+                *active_turn_id = None;
+                *turn_completed = true;
+            }
+        }
+        "thread/status/changed" => {
+            let is_idle = params
+                .get("status")
+                .and_then(|status| status.get("type"))
+                .and_then(Value::as_str)
+                == Some("idle");
+            if is_idle
+                && active_turn_id.is_some()
+                && (*assistant_message_completed || turn_error.is_some())
+            {
+                *active_turn_id = None;
                 *turn_completed = true;
             }
         }
@@ -495,8 +513,13 @@ where
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string();
+                        *assistant_message_completed = true;
                         summary.assistant_text = text.clone();
                         let _ = on_event(CodexEvent::AssistantText(text)).await?;
+                        if item.get("phase").and_then(Value::as_str) == Some("final_answer") {
+                            *active_turn_id = None;
+                            *turn_completed = true;
+                        }
                     }
                     Some("commandExecution") => {
                         let status = item
@@ -1225,7 +1248,13 @@ impl AppServerProcess {
     }
     async fn shutdown(mut self) -> Result<String> {
         terminate_child(&mut self.child).await;
-        let _ = self.stderr_task.await;
+        if tokio::time::timeout(Duration::from_secs(2), &mut self.stderr_task)
+            .await
+            .is_err()
+        {
+            tracing::debug!("codex app-server stderr task did not exit promptly; aborting");
+            self.stderr_task.abort();
+        }
         Ok(self.stderr_buffer.lock().await.trim().to_string())
     }
 }
@@ -1605,5 +1634,173 @@ mod tests {
 
         assert!(!status.authenticated);
         assert_eq!(status.detail, "Not logged in");
+    }
+
+    #[tokio::test]
+    async fn completes_turn_when_legacy_thread_goes_idle_after_agent_message() {
+        let mut summary = RunSummary {
+            codex_thread_id: None,
+            assistant_text: String::new(),
+            stderr_text: String::new(),
+        };
+        let mut active_turn_id = Some("turn-1".to_string());
+        let mut turn_error = None;
+        let mut turn_completed = false;
+        let mut assistant_message_completed = false;
+        let mut on_event = |_event| async { Ok(CodexEventOutcome::None) };
+
+        handle_notification(
+            "item/completed",
+            &json!({
+                "item": {
+                    "type": "agentMessage",
+                    "text": "Вижу."
+                }
+            }),
+            &mut summary,
+            &mut active_turn_id,
+            &mut turn_error,
+            &mut turn_completed,
+            &mut assistant_message_completed,
+            &mut on_event,
+        )
+        .await
+        .expect("handle agent message");
+
+        assert_eq!(summary.assistant_text, "Вижу.");
+        assert!(assistant_message_completed);
+        assert!(!turn_completed);
+
+        handle_notification(
+            "thread/status/changed",
+            &json!({
+                "status": {
+                    "type": "idle"
+                }
+            }),
+            &mut summary,
+            &mut active_turn_id,
+            &mut turn_error,
+            &mut turn_completed,
+            &mut assistant_message_completed,
+            &mut on_event,
+        )
+        .await
+        .expect("handle idle status");
+
+        assert!(turn_completed);
+        assert!(active_turn_id.is_none());
+        assert!(turn_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn ignores_idle_without_completed_agent_message() {
+        let mut summary = RunSummary {
+            codex_thread_id: None,
+            assistant_text: String::new(),
+            stderr_text: String::new(),
+        };
+        let mut active_turn_id = Some("turn-1".to_string());
+        let mut turn_error = None;
+        let mut turn_completed = false;
+        let mut assistant_message_completed = false;
+        let mut on_event = |_event| async { Ok(CodexEventOutcome::None) };
+
+        handle_notification(
+            "thread/status/changed",
+            &json!({
+                "status": {
+                    "type": "idle"
+                }
+            }),
+            &mut summary,
+            &mut active_turn_id,
+            &mut turn_error,
+            &mut turn_completed,
+            &mut assistant_message_completed,
+            &mut on_event,
+        )
+        .await
+        .expect("handle idle status");
+
+        assert!(!turn_completed);
+        assert_eq!(active_turn_id.as_deref(), Some("turn-1"));
+    }
+
+    #[tokio::test]
+    async fn completes_turn_on_final_answer_item_completed() {
+        let mut summary = RunSummary {
+            codex_thread_id: None,
+            assistant_text: String::new(),
+            stderr_text: String::new(),
+        };
+        let mut active_turn_id = Some("turn-1".to_string());
+        let mut turn_error = None;
+        let mut turn_completed = false;
+        let mut assistant_message_completed = false;
+        let mut on_event = |_event| async { Ok(CodexEventOutcome::None) };
+
+        handle_notification(
+            "item/completed",
+            &json!({
+                "item": {
+                    "type": "agentMessage",
+                    "text": "На связи.",
+                    "phase": "final_answer"
+                }
+            }),
+            &mut summary,
+            &mut active_turn_id,
+            &mut turn_error,
+            &mut turn_completed,
+            &mut assistant_message_completed,
+            &mut on_event,
+        )
+        .await
+        .expect("handle final answer");
+
+        assert_eq!(summary.assistant_text, "На связи.");
+        assert!(assistant_message_completed);
+        assert!(turn_completed);
+        assert!(active_turn_id.is_none());
+        assert!(turn_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn commentary_agent_message_does_not_complete_turn() {
+        let mut summary = RunSummary {
+            codex_thread_id: None,
+            assistant_text: String::new(),
+            stderr_text: String::new(),
+        };
+        let mut active_turn_id = Some("turn-1".to_string());
+        let mut turn_error = None;
+        let mut turn_completed = false;
+        let mut assistant_message_completed = false;
+        let mut on_event = |_event| async { Ok(CodexEventOutcome::None) };
+
+        handle_notification(
+            "item/completed",
+            &json!({
+                "item": {
+                    "type": "agentMessage",
+                    "text": "Смотрю логи.",
+                    "phase": "commentary"
+                }
+            }),
+            &mut summary,
+            &mut active_turn_id,
+            &mut turn_error,
+            &mut turn_completed,
+            &mut assistant_message_completed,
+            &mut on_event,
+        )
+        .await
+        .expect("handle commentary message");
+
+        assert_eq!(summary.assistant_text, "Смотрю логи.");
+        assert!(assistant_message_completed);
+        assert!(!turn_completed);
+        assert_eq!(active_turn_id.as_deref(), Some("turn-1"));
     }
 }
