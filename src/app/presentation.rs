@@ -108,11 +108,6 @@ pub(super) fn history_keyboard(
         url: None,
     }];
     row.push(InlineKeyboardButton {
-        text: format!("{}/{}", current + 1, total),
-        callback_data: Some(format!("his:{thread_id}:{current}")),
-        url: None,
-    });
-    row.push(InlineKeyboardButton {
         text: "Next".to_string(),
         callback_data: Some(format!("his:{thread_id}:{next}")),
         url: None,

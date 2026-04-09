@@ -1095,16 +1095,13 @@ fn builds_history_keyboard_buttons() {
         history_keyboard("019ce672-9445-7612-bc5e-c8243a0d1915", 1, 3).expect("history keyboard");
 
     assert_eq!(keyboard.inline_keyboard.len(), 1);
+    assert_eq!(keyboard.inline_keyboard[0].len(), 2);
     assert_eq!(
         keyboard.inline_keyboard[0][0].callback_data,
         Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:0".to_string())
     );
     assert_eq!(
         keyboard.inline_keyboard[0][1].callback_data,
-        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:1".to_string())
-    );
-    assert_eq!(
-        keyboard.inline_keyboard[0][2].callback_data,
         Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:2".to_string())
     );
 }
@@ -1119,7 +1116,7 @@ fn history_keyboard_wraps_around() {
         Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:2".to_string())
     );
     assert_eq!(
-        keyboard.inline_keyboard[0][2].callback_data,
+        keyboard.inline_keyboard[0][1].callback_data,
         Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:1".to_string())
     );
 }
