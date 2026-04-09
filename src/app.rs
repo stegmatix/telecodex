@@ -75,6 +75,7 @@ struct AppShared {
     handy_model_dir: Option<PathBuf>,
     session_defaults: SessionDefaults,
     limits_cache: Mutex<Option<CachedLimitsSnapshot>>,
+    history_page_cache: Mutex<HistoryPageCache>,
     pending_approvals: Mutex<HashMap<String, PendingApproval>>,
     pending_codex_login: Mutex<Option<PendingCodexLogin>>,
     codex_login_backoff_until: Mutex<Option<Instant>>,
@@ -98,6 +99,83 @@ struct CachedLimitsSnapshot {
     snapshot: LimitsSnapshot,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HistoryPageData {
+    thread_title: String,
+    pages: Vec<CodexHistoryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HistoryPageCacheKey {
+    codex_thread_id: String,
+    message_id: i64,
+}
+
+#[derive(Debug, Clone)]
+struct HistoryPageCacheEntry {
+    data: HistoryPageData,
+    cached_at: Instant,
+    last_accessed_at: Instant,
+}
+
+#[derive(Default)]
+struct HistoryPageCache {
+    entries: HashMap<HistoryPageCacheKey, HistoryPageCacheEntry>,
+}
+
+impl HistoryPageCache {
+    fn get(
+        &mut self,
+        key: &HistoryPageCacheKey,
+        now: Instant,
+        ttl: Duration,
+    ) -> Option<HistoryPageData> {
+        self.evict_stale(now, ttl);
+        let entry = self.entries.get_mut(key)?;
+        entry.last_accessed_at = now;
+        Some(entry.data.clone())
+    }
+
+    fn insert(
+        &mut self,
+        key: HistoryPageCacheKey,
+        data: HistoryPageData,
+        now: Instant,
+        ttl: Duration,
+        max_entries: usize,
+    ) {
+        self.evict_stale(now, ttl);
+        self.entries.insert(
+            key,
+            HistoryPageCacheEntry {
+                data,
+                cached_at: now,
+                last_accessed_at: now,
+            },
+        );
+        self.enforce_size_limit(max_entries);
+    }
+
+    fn evict_stale(&mut self, now: Instant, ttl: Duration) {
+        self.entries
+            .retain(|_, entry| now.saturating_duration_since(entry.cached_at) <= ttl);
+    }
+
+    fn enforce_size_limit(&mut self, max_entries: usize) {
+        while self.entries.len() > max_entries {
+            let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_accessed_at)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest_key);
+        }
+    }
+}
+
 struct PendingApproval {
     requester_user_id: i64,
     responder: oneshot::Sender<CodexApprovalDecision>,
@@ -110,6 +188,8 @@ struct TurnWorkspace {
 
 impl App {
     const BACKGROUND_MAINTENANCE_INTERVAL_SECONDS: u64 = 60;
+    const HISTORY_PAGE_CACHE_MAX_ENTRIES: usize = 64;
+    const HISTORY_PAGE_CACHE_TTL_SECONDS: u64 = 300;
 
     pub async fn bootstrap(config: Config) -> Result<Self> {
         let token = config.telegram.resolve_token()?;
@@ -136,6 +216,7 @@ impl App {
                 handy_model_dir,
                 session_defaults,
                 limits_cache: Mutex::new(None),
+                history_page_cache: Mutex::new(HistoryPageCache::default()),
                 pending_approvals: Mutex::new(HashMap::new()),
                 pending_codex_login: Mutex::new(None),
                 codex_login_backoff_until: Mutex::new(None),
@@ -1433,9 +1514,21 @@ impl App {
         codex_thread_id: &str,
         requested_index: usize,
     ) -> Result<()> {
-        let history = read_thread_history(&default_codex_home(), codex_thread_id, usize::MAX)?;
-        let pages = assistant_history_pages(&history);
-        if pages.is_empty() {
+        let history_page = if message_id > 0 {
+            match self.cached_history_page(codex_thread_id, message_id).await {
+                Some(cached) => cached,
+                None => {
+                    let loaded = load_history_page(codex_thread_id)?;
+                    self.cache_history_page(codex_thread_id, message_id, loaded.clone())
+                        .await;
+                    loaded
+                }
+            }
+        } else {
+            load_history_page(codex_thread_id)?
+        };
+
+        if history_page.pages.is_empty() {
             let body = format!(
                 "No final assistant messages found for Codex session `{}`.",
                 short_codex_thread_id(codex_thread_id)
@@ -1449,17 +1542,25 @@ impl App {
             return Ok(());
         }
 
-        let index = requested_index % pages.len();
-        let title = history_thread_title(codex_thread_id);
-        let body = format_history_page(&title, codex_thread_id, index, pages.len(), &pages[index]);
-        let keyboard = history_keyboard(codex_thread_id, index, pages.len());
+        let index = requested_index % history_page.pages.len();
+        let body = format_history_page(
+            &history_page.thread_title,
+            codex_thread_id,
+            index,
+            history_page.pages.len(),
+            &history_page.pages[index],
+        );
+        let keyboard = history_keyboard(codex_thread_id, index, history_page.pages.len());
         if message_id > 0 {
             self.edit_markdown_message(chat_id, message_id, &body, keyboard)
                 .await
         } else {
-            send_markdown_message(&self.shared.telegram, chat_id, thread_id, &body, keyboard)
-                .await
-                .map(|_| ())
+            let message =
+                send_markdown_message(&self.shared.telegram, chat_id, thread_id, &body, keyboard)
+                    .await?;
+            self.cache_history_page(codex_thread_id, message.message_id, history_page)
+                .await;
+            Ok(())
         }
     }
 
@@ -1479,6 +1580,45 @@ impl App {
             self.send_status(chat_id, thread_id, &body).await
         }
     }
+
+    async fn cached_history_page(
+        &self,
+        codex_thread_id: &str,
+        message_id: i64,
+    ) -> Option<HistoryPageData> {
+        if message_id <= 0 {
+            return None;
+        }
+        self.shared.history_page_cache.lock().await.get(
+            &HistoryPageCacheKey {
+                codex_thread_id: codex_thread_id.to_string(),
+                message_id,
+            },
+            Instant::now(),
+            Duration::from_secs(Self::HISTORY_PAGE_CACHE_TTL_SECONDS),
+        )
+    }
+
+    async fn cache_history_page(
+        &self,
+        codex_thread_id: &str,
+        message_id: i64,
+        history_page: HistoryPageData,
+    ) {
+        if message_id <= 0 {
+            return;
+        }
+        self.shared.history_page_cache.lock().await.insert(
+            HistoryPageCacheKey {
+                codex_thread_id: codex_thread_id.to_string(),
+                message_id,
+            },
+            history_page,
+            Instant::now(),
+            Duration::from_secs(Self::HISTORY_PAGE_CACHE_TTL_SECONDS),
+            Self::HISTORY_PAGE_CACHE_MAX_ENTRIES,
+        );
+    }
 }
 
 fn latest_assistant_text_from_history(history: &[CodexHistoryEntry]) -> Option<&str> {
@@ -1496,6 +1636,14 @@ fn history_thread_title(thread_id: &str) -> String {
         .map(|summary| summary.title)
         .filter(|title| !title.trim().is_empty())
         .unwrap_or_else(|| short_codex_thread_id(thread_id))
+}
+
+fn load_history_page(thread_id: &str) -> Result<HistoryPageData> {
+    let history = read_thread_history(&default_codex_home(), thread_id, usize::MAX)?;
+    Ok(HistoryPageData {
+        thread_title: history_thread_title(thread_id),
+        pages: assistant_history_pages(&history),
+    })
 }
 
 fn assistant_history_pages(history: &[CodexHistoryEntry]) -> Vec<CodexHistoryEntry> {

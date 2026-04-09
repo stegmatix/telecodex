@@ -763,7 +763,17 @@ pub(super) fn format_session_status(
     chat: &crate::telegram::Chat,
 ) -> String {
     let telegram_title = escape_markdown_label(&session_title_label(session, chat));
-    let codex_title = escape_markdown_label(&current_session_label(session, chat));
+    let codex_title = session
+        .codex_thread_id
+        .as_deref()
+        .map(|_| escape_markdown_label(&current_session_label(session, chat)))
+        .unwrap_or_else(|| {
+            escape_markdown_label(if session.force_fresh_thread {
+                "fresh"
+            } else {
+                "unbound"
+            })
+        });
     let state = if session.busy { "busy" } else { "idle" };
     let codex_thread = session
         .codex_thread_id

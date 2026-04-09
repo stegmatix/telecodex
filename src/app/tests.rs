@@ -361,6 +361,162 @@ fn forum_sync_preserves_fresh_thread_request() {
 }
 
 #[test]
+fn format_session_status_marks_unbound_codex_session() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(-1001234567890, Some(323)),
+        session_title: Some("Water meter".to_string()),
+        codex_thread_id: None,
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let chat = crate::telegram::Chat {
+        id: -1001234567890,
+        kind: "supergroup".to_string(),
+        is_forum: Some(true),
+        username: Some("varv_alarms_bot_chat".to_string()),
+        title: Some("Codex chat".to_string()),
+    };
+
+    let status = format_session_status(&session, &chat);
+
+    assert!(status.contains("**Current Telegram session:** Water meter"));
+    assert!(status.contains("- codex session title: unbound"));
+    assert!(!status.contains("- codex session title: Water meter"));
+}
+
+#[test]
+fn format_session_status_marks_fresh_codex_session() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(-1001234567890, Some(323)),
+        session_title: Some("Water meter".to_string()),
+        codex_thread_id: None,
+        force_fresh_thread: true,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let chat = crate::telegram::Chat {
+        id: -1001234567890,
+        kind: "supergroup".to_string(),
+        is_forum: Some(true),
+        username: Some("varv_alarms_bot_chat".to_string()),
+        title: Some("Codex chat".to_string()),
+    };
+
+    let status = format_session_status(&session, &chat);
+
+    assert!(status.contains("- codex session title: fresh"));
+}
+
+#[test]
+fn history_page_cache_evicts_oldest_entry_when_size_limit_is_hit() {
+    let ttl = Duration::from_secs(300);
+    let base = Instant::now();
+    let mut cache = HistoryPageCache::default();
+    let page = HistoryPageData {
+        thread_title: "Session".to_string(),
+        pages: vec![crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "answer".to_string(),
+            timestamp: "2026-03-13T09:00:00Z".to_string(),
+        }],
+    };
+    let first = HistoryPageCacheKey {
+        codex_thread_id: "thread-1".to_string(),
+        message_id: 10,
+    };
+    let second = HistoryPageCacheKey {
+        codex_thread_id: "thread-2".to_string(),
+        message_id: 11,
+    };
+    let third = HistoryPageCacheKey {
+        codex_thread_id: "thread-3".to_string(),
+        message_id: 12,
+    };
+
+    cache.insert(first.clone(), page.clone(), base, ttl, 2);
+    cache.insert(
+        second.clone(),
+        page.clone(),
+        base + Duration::from_secs(1),
+        ttl,
+        2,
+    );
+    cache.insert(
+        third.clone(),
+        page.clone(),
+        base + Duration::from_secs(2),
+        ttl,
+        2,
+    );
+
+    assert!(
+        cache
+            .get(&first, base + Duration::from_secs(2), ttl)
+            .is_none()
+    );
+    assert_eq!(
+        cache.get(&second, base + Duration::from_secs(2), ttl),
+        Some(page.clone())
+    );
+    assert_eq!(
+        cache.get(&third, base + Duration::from_secs(2), ttl),
+        Some(page)
+    );
+}
+
+#[test]
+fn history_page_cache_expires_stale_entries() {
+    let ttl = Duration::from_secs(60);
+    let base = Instant::now();
+    let mut cache = HistoryPageCache::default();
+    let key = HistoryPageCacheKey {
+        codex_thread_id: "thread-1".to_string(),
+        message_id: 10,
+    };
+
+    cache.insert(
+        key.clone(),
+        HistoryPageData {
+            thread_title: "Session".to_string(),
+            pages: vec![crate::codex_history::CodexHistoryEntry {
+                role: "assistant".to_string(),
+                text: "answer".to_string(),
+                timestamp: "2026-03-13T09:00:00Z".to_string(),
+            }],
+        },
+        base,
+        ttl,
+        4,
+    );
+
+    assert!(
+        cache
+            .get(&key, base + Duration::from_secs(61), ttl)
+            .is_none()
+    );
+    assert!(cache.entries.is_empty());
+}
+
+#[test]
 fn picks_last_assistant_text_from_history() {
     let history = vec![
         crate::codex_history::CodexHistoryEntry {
