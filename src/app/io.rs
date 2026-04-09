@@ -316,7 +316,12 @@ impl App {
                 let fallback = html_escape::encode_safe(markdown).to_string();
                 let mut fallback_request = EditMessageText::html(chat_id, message_id, fallback);
                 fallback_request.reply_markup = reply_markup;
-                match self.shared.telegram.edit_message_text(fallback_request).await {
+                match self
+                    .shared
+                    .telegram
+                    .edit_message_text(fallback_request)
+                    .await
+                {
                     Ok(_) => Ok(()),
                     Err(fallback_error) if is_message_not_modified(&fallback_error) => Ok(()),
                     Err(fallback_error)

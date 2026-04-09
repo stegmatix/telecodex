@@ -1,5 +1,5 @@
-use std::{error::Error, fmt};
 use std::time::Duration;
+use std::{error::Error, fmt};
 
 use anyhow::{Context, Result, bail};
 use reqwest::StatusCode;
