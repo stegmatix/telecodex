@@ -168,6 +168,60 @@ fn builds_clickable_chat_sessions_keyboard() {
 }
 
 #[test]
+fn builds_topic_links_for_dashboard_root_sessions_keyboard() {
+    let root_session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(-1001234567890, None),
+        session_title: Some("Dashboard".to_string()),
+        codex_thread_id: None,
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let topic_session = crate::models::SessionRecord {
+        id: 2,
+        key: SessionKey::new(-1001234567890, Some(323)),
+        session_title: Some("Water meter".to_string()),
+        codex_thread_id: Some("019ce152-99e8-7c30-b5b7-166e6aebd550".to_string()),
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let chat = crate::telegram::Chat {
+        id: -1001234567890,
+        kind: "supergroup".to_string(),
+        is_forum: Some(true),
+        username: Some("varv_alarms_bot_chat".to_string()),
+        title: Some("Codex chat".to_string()),
+    };
+
+    let keyboard =
+        chat_sessions_keyboard(&root_session, &chat, std::slice::from_ref(&topic_session)).unwrap();
+
+    assert_eq!(keyboard.inline_keyboard[0][0].callback_data, None);
+    assert_eq!(
+        keyboard.inline_keyboard[0][0].url,
+        Some("https://t.me/varv_alarms_bot_chat/323?thread=323".to_string())
+    );
+}
+
+#[test]
 fn derives_private_topic_link_slug_from_bot_api_chat_id() {
     assert_eq!(private_topic_link_slug(-1001234567890), Some(1234567890));
     assert_eq!(private_topic_link_slug(275328656), None);
@@ -208,6 +262,240 @@ fn session_environment_match_requires_same_title_and_cwd() {
 
     assert!(session_matches_environment(&session, &same));
     assert!(!session_matches_environment(&session, &different_title));
+}
+
+#[test]
+fn forum_sync_preserves_manual_codex_binding() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(-1001234567890, Some(323)),
+        session_title: Some("kombez".to_string()),
+        codex_thread_id: Some("manual-thread".to_string()),
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let environment = crate::codex_history::CodexEnvironmentSummary {
+        cwd: sample_workspace(),
+        name: "kombez".to_string(),
+        latest_thread_id: Some("latest-thread".to_string()),
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+    };
+
+    assert_eq!(
+        super::forum::environment_sync_thread_binding(&session, &environment),
+        None
+    );
+}
+
+#[test]
+fn forum_sync_seeds_unbound_environment_session() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(-1001234567890, Some(323)),
+        session_title: Some("kombez".to_string()),
+        codex_thread_id: None,
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let environment = crate::codex_history::CodexEnvironmentSummary {
+        cwd: sample_workspace(),
+        name: "kombez".to_string(),
+        latest_thread_id: Some("latest-thread".to_string()),
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+    };
+
+    assert_eq!(
+        super::forum::environment_sync_thread_binding(&session, &environment),
+        Some("latest-thread")
+    );
+}
+
+#[test]
+fn forum_sync_preserves_fresh_thread_request() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(-1001234567890, Some(323)),
+        session_title: Some("kombez".to_string()),
+        codex_thread_id: None,
+        force_fresh_thread: true,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+    let environment = crate::codex_history::CodexEnvironmentSummary {
+        cwd: sample_workspace(),
+        name: "kombez".to_string(),
+        latest_thread_id: Some("latest-thread".to_string()),
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+    };
+
+    assert_eq!(
+        super::forum::environment_sync_thread_binding(&session, &environment),
+        None
+    );
+}
+
+#[test]
+fn picks_last_assistant_text_from_history() {
+    let history = vec![
+        crate::codex_history::CodexHistoryEntry {
+            role: "user".to_string(),
+            text: "first".to_string(),
+            timestamp: "2026-03-13T09:00:00Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "alpha".to_string(),
+            timestamp: "2026-03-13T09:00:01Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "beta".to_string(),
+            timestamp: "2026-03-13T09:00:02Z".to_string(),
+        },
+    ];
+
+    assert_eq!(latest_assistant_text_from_history(&history), Some("beta"));
+}
+
+#[test]
+fn assistant_history_pages_keep_only_assistant_messages_and_start_latest() {
+    let history = vec![
+        crate::codex_history::CodexHistoryEntry {
+            role: "user".to_string(),
+            text: "u1".to_string(),
+            timestamp: "2026-03-13T09:00:00Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "a1".to_string(),
+            timestamp: "2026-03-13T09:00:01Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "user".to_string(),
+            text: "u2".to_string(),
+            timestamp: "2026-03-13T09:00:02Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "a2".to_string(),
+            timestamp: "2026-03-13T09:00:03Z".to_string(),
+        },
+    ];
+
+    let pages = assistant_history_pages(&history);
+
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].text, "a2");
+    assert_eq!(pages[1].text, "a1");
+}
+
+#[test]
+fn history_callback_matches_only_current_session_binding() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(1, Some(2)),
+        session_title: Some("kombez".to_string()),
+        codex_thread_id: Some("019ce672-9445-7612-bc5e-c8243a0d1915".to_string()),
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+
+    assert!(history_callback_matches_current_session(
+        &session,
+        "019ce672-9445-7612-bc5e-c8243a0d1915"
+    ));
+    assert!(!history_callback_matches_current_session(
+        &session,
+        "019ce672-9445-7612-bc5e-c8243a0d1916"
+    ));
+}
+
+#[test]
+fn history_callback_rejects_unbound_fresh_session() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(1, Some(2)),
+        session_title: Some("kombez".to_string()),
+        codex_thread_id: None,
+        force_fresh_thread: true,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+
+    assert!(!history_callback_matches_current_session(
+        &session,
+        "019ce672-9445-7612-bc5e-c8243a0d1915"
+    ));
+}
+
+#[test]
+fn formats_stale_history_page_for_rebound_topic() {
+    let session = crate::models::SessionRecord {
+        id: 1,
+        key: SessionKey::new(1, Some(2)),
+        session_title: Some("kombez".to_string()),
+        codex_thread_id: Some("019ce672-9445-7612-bc5e-c8243a0d1916".to_string()),
+        force_fresh_thread: false,
+        updated_at: "2026-03-13T10:00:00Z".to_string(),
+        cwd: sample_workspace(),
+        model: None,
+        reasoning_effort: None,
+        session_prompt: None,
+        sandbox_mode: "workspace-write".to_string(),
+        approval_policy: "never".to_string(),
+        search_mode: SearchMode::Disabled,
+        add_dirs: vec![],
+        busy: false,
+    };
+
+    let text = format_stale_history_page(&session, "019ce672-9445-7612-bc5e-c8243a0d1915");
+
+    assert!(text.contains("This `/history` view is stale."));
+    assert!(text.contains("019ce672"));
+    assert!(text.contains("Run `/history` again"));
 }
 
 #[test]
@@ -610,6 +898,15 @@ fn parses_approval_callback_payloads() {
 }
 
 #[test]
+fn parses_history_callback_payloads() {
+    assert_eq!(
+        parse_history_callback_data("his:019ce672-9445-7612-bc5e-c8243a0d1915:7"),
+        Some(("019ce672-9445-7612-bc5e-c8243a0d1915".to_string(), 7))
+    );
+    assert_eq!(parse_history_callback_data("his:bad"), None);
+}
+
+#[test]
 fn builds_approval_keyboard_buttons() {
     let keyboard = approval_keyboard(
         "token123",
@@ -634,6 +931,63 @@ fn builds_approval_keyboard_buttons() {
         keyboard.inline_keyboard[1][0].callback_data,
         Some("apr:token123:c".to_string())
     );
+}
+
+#[test]
+fn builds_history_keyboard_buttons() {
+    let keyboard =
+        history_keyboard("019ce672-9445-7612-bc5e-c8243a0d1915", 1, 3).expect("history keyboard");
+
+    assert_eq!(keyboard.inline_keyboard.len(), 1);
+    assert_eq!(
+        keyboard.inline_keyboard[0][0].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:0".to_string())
+    );
+    assert_eq!(
+        keyboard.inline_keyboard[0][1].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:1".to_string())
+    );
+    assert_eq!(
+        keyboard.inline_keyboard[0][2].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:2".to_string())
+    );
+}
+
+#[test]
+fn history_keyboard_wraps_around() {
+    let keyboard =
+        history_keyboard("019ce672-9445-7612-bc5e-c8243a0d1915", 0, 3).expect("history keyboard");
+
+    assert_eq!(
+        keyboard.inline_keyboard[0][0].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:2".to_string())
+    );
+    assert_eq!(
+        keyboard.inline_keyboard[0][2].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:1".to_string())
+    );
+}
+
+#[test]
+fn formats_history_page() {
+    let entry = crate::codex_history::CodexHistoryEntry {
+        role: "assistant".to_string(),
+        text: "Done".to_string(),
+        timestamp: "2026-03-13T09:00:01Z".to_string(),
+    };
+
+    let page = format_history_page(
+        "kombez",
+        "019ce672-9445-7612-bc5e-c8243a0d1915",
+        1,
+        3,
+        &entry,
+    );
+
+    assert!(page.contains("**Session history**"));
+    assert!(page.contains("message: `2/3`"));
+    assert!(page.contains("role: `assistant`"));
+    assert!(page.contains("Done"));
 }
 
 #[test]
@@ -663,14 +1017,26 @@ fn detects_commands_that_use_session_context() {
         BridgeCommand::Copy
     )));
     assert!(!command_uses_session_context(&ParsedInput::Bridge(
+        BridgeCommand::Sessions
+    )));
+    assert!(!command_uses_session_context(&ParsedInput::Bridge(
+        BridgeCommand::History
+    )));
+    assert!(!command_uses_session_context(&ParsedInput::Bridge(
+        BridgeCommand::Status
+    )));
+    assert!(!command_uses_session_context(&ParsedInput::Bridge(
         BridgeCommand::RestartBot
     )));
 }
 
 #[test]
 fn detects_commands_that_require_codex_auth() {
-    assert!(parsed_input_requires_codex_auth(&ParsedInput::Forward(
-        "/status".to_string()
+    assert!(!parsed_input_requires_codex_auth(&ParsedInput::Bridge(
+        BridgeCommand::Status
+    )));
+    assert!(!parsed_input_requires_codex_auth(&ParsedInput::Bridge(
+        BridgeCommand::History
     )));
     assert!(parsed_input_requires_codex_auth(&ParsedInput::Bridge(
         BridgeCommand::Review(crate::models::ReviewRequest {

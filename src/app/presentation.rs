@@ -58,6 +58,16 @@ pub(super) fn parse_approval_callback_data(data: &str) -> Option<(String, CodexA
     Some((token, decision))
 }
 
+pub(super) fn parse_history_callback_data(data: &str) -> Option<(String, usize)> {
+    let mut parts = data.split(':');
+    if parts.next()? != "his" {
+        return None;
+    }
+    let thread_id = parts.next()?.to_string();
+    let index = parts.next()?.parse::<usize>().ok()?;
+    Some((thread_id, index))
+}
+
 pub(super) fn approval_keyboard(
     token: &str,
     options: &[CodexApprovalDecision],
@@ -79,6 +89,37 @@ pub(super) fn approval_keyboard(
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
     Some(InlineKeyboardMarkup { inline_keyboard })
+}
+
+pub(super) fn history_keyboard(
+    thread_id: &str,
+    index: usize,
+    total: usize,
+) -> Option<InlineKeyboardMarkup> {
+    if total == 0 {
+        return None;
+    }
+    let current = index % total;
+    let previous = if current == 0 { total - 1 } else { current - 1 };
+    let next = (current + 1) % total;
+    let mut row = vec![InlineKeyboardButton {
+        text: "Prev".to_string(),
+        callback_data: Some(format!("his:{thread_id}:{previous}")),
+        url: None,
+    }];
+    row.push(InlineKeyboardButton {
+        text: format!("{}/{}", current + 1, total),
+        callback_data: Some(format!("his:{thread_id}:{current}")),
+        url: None,
+    });
+    row.push(InlineKeyboardButton {
+        text: "Next".to_string(),
+        callback_data: Some(format!("his:{thread_id}:{next}")),
+        url: None,
+    });
+    Some(InlineKeyboardMarkup {
+        inline_keyboard: vec![row],
+    })
 }
 
 pub(super) async fn send_markdown_message(
@@ -501,6 +542,7 @@ pub(super) fn chat_sessions_keyboard(
     chat: &crate::telegram::Chat,
     sessions: &[crate::models::SessionRecord],
 ) -> Option<InlineKeyboardMarkup> {
+    let dashboard_root = current_session.key.thread_id == 0 && chat.is_forum.unwrap_or(false);
     let mut inline_keyboard = Vec::new();
     for session in sessions
         .iter()
@@ -516,10 +558,19 @@ pub(super) fn chat_sessions_keyboard(
         } else {
             truncate_button_label(&label)
         };
+        let topic_url = session_topic_url(chat, session.key.thread_id);
+        let (callback_data, url) = if dashboard_root {
+            match topic_url {
+                Some(url) => (None, Some(url)),
+                None => (Some(format!("ses:{}", session.key.thread_id)), None),
+            }
+        } else {
+            (Some(format!("ses:{}", session.key.thread_id)), None)
+        };
         inline_keyboard.push(vec![InlineKeyboardButton {
             text,
-            callback_data: Some(format!("ses:{}", session.key.thread_id)),
-            url: None,
+            callback_data,
+            url,
         }]);
     }
     if inline_keyboard.is_empty() {
@@ -705,6 +756,75 @@ pub(super) fn current_session_label(
         }
     }
     session_title_label(session, chat)
+}
+
+pub(super) fn format_session_status(
+    session: &crate::models::SessionRecord,
+    chat: &crate::telegram::Chat,
+) -> String {
+    let telegram_title = escape_markdown_label(&session_title_label(session, chat));
+    let codex_title = escape_markdown_label(&current_session_label(session, chat));
+    let state = if session.busy { "busy" } else { "idle" };
+    let codex_thread = session
+        .codex_thread_id
+        .as_deref()
+        .map(short_codex_thread_id)
+        .unwrap_or_else(|| "new".to_string());
+    let model = session.model.as_deref().unwrap_or("default");
+    let reasoning = session.reasoning_effort.as_deref().unwrap_or("default");
+    let prompt = if session
+        .session_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        "set"
+    } else {
+        "none"
+    };
+
+    format!(
+        "**Current Telegram session:** {telegram_title}\n- codex session title: {codex_title}\n- state: `{state}`\n- cwd: `{}`\n- codex thread: `{}`\n- model: `{model}`\n- reasoning: `{reasoning}`\n- approval: `{}`\n- sandbox: `{}`\n- search: `{}`\n- prompt: `{prompt}`",
+        session.cwd.display(),
+        codex_thread,
+        session.approval_policy,
+        session.sandbox_mode,
+        session.search_mode.as_codex_value(),
+    )
+}
+
+pub(super) fn format_history_page(
+    thread_title: &str,
+    thread_id: &str,
+    index: usize,
+    total: usize,
+    entry: &CodexHistoryEntry,
+) -> String {
+    let thread_title = escape_markdown_label(thread_title.trim());
+    let role = escape_markdown_label(&entry.role);
+    let timestamp = escape_markdown_label(&entry.timestamp);
+    format!(
+        "**Session history**\n- codex session title: {thread_title}\n- codex thread: `{}`\n- message: `{}/{}`\n- role: `{role}`\n- time: `{timestamp}`\n\n```text\n{}\n```",
+        short_codex_thread_id(thread_id),
+        index + 1,
+        total,
+        truncate_history_page_text(&entry.text),
+    )
+}
+
+fn truncate_history_page_text(text: &str) -> String {
+    const MAX_CHARS: usize = 3200;
+    let normalized = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace("```", "'''");
+    if normalized.chars().count() <= MAX_CHARS {
+        return normalized;
+    }
+    let mut truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push_str("\n...");
+    truncated
 }
 
 pub(super) fn environment_topic_name(environment: &CodexEnvironmentSummary) -> String {
