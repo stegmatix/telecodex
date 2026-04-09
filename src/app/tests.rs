@@ -385,6 +385,38 @@ fn picks_last_assistant_text_from_history() {
 }
 
 #[test]
+fn assistant_history_pages_keep_only_assistant_messages_and_start_latest() {
+    let history = vec![
+        crate::codex_history::CodexHistoryEntry {
+            role: "user".to_string(),
+            text: "u1".to_string(),
+            timestamp: "2026-03-13T09:00:00Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "a1".to_string(),
+            timestamp: "2026-03-13T09:00:01Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "user".to_string(),
+            text: "u2".to_string(),
+            timestamp: "2026-03-13T09:00:02Z".to_string(),
+        },
+        crate::codex_history::CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "a2".to_string(),
+            timestamp: "2026-03-13T09:00:03Z".to_string(),
+        },
+    ];
+
+    let pages = assistant_history_pages(&history);
+
+    assert_eq!(pages.len(), 2);
+    assert_eq!(pages[0].text, "a2");
+    assert_eq!(pages[1].text, "a1");
+}
+
+#[test]
 fn builds_import_button_for_seed_environment() {
     let session = crate::models::SessionRecord {
         id: 1,
@@ -784,6 +816,18 @@ fn parses_approval_callback_payloads() {
 }
 
 #[test]
+fn parses_history_callback_payloads() {
+    assert_eq!(
+        parse_history_callback_data("his:019ce672-9445-7612-bc5e-c8243a0d1915:7"),
+        Some((
+            "019ce672-9445-7612-bc5e-c8243a0d1915".to_string(),
+            7
+        ))
+    );
+    assert_eq!(parse_history_callback_data("his:bad"), None);
+}
+
+#[test]
 fn builds_approval_keyboard_buttons() {
     let keyboard = approval_keyboard(
         "token123",
@@ -808,6 +852,63 @@ fn builds_approval_keyboard_buttons() {
         keyboard.inline_keyboard[1][0].callback_data,
         Some("apr:token123:c".to_string())
     );
+}
+
+#[test]
+fn builds_history_keyboard_buttons() {
+    let keyboard =
+        history_keyboard("019ce672-9445-7612-bc5e-c8243a0d1915", 1, 3).expect("history keyboard");
+
+    assert_eq!(keyboard.inline_keyboard.len(), 1);
+    assert_eq!(
+        keyboard.inline_keyboard[0][0].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:0".to_string())
+    );
+    assert_eq!(
+        keyboard.inline_keyboard[0][1].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:1".to_string())
+    );
+    assert_eq!(
+        keyboard.inline_keyboard[0][2].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:2".to_string())
+    );
+}
+
+#[test]
+fn history_keyboard_wraps_around() {
+    let keyboard =
+        history_keyboard("019ce672-9445-7612-bc5e-c8243a0d1915", 0, 3).expect("history keyboard");
+
+    assert_eq!(
+        keyboard.inline_keyboard[0][0].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:2".to_string())
+    );
+    assert_eq!(
+        keyboard.inline_keyboard[0][2].callback_data,
+        Some("his:019ce672-9445-7612-bc5e-c8243a0d1915:1".to_string())
+    );
+}
+
+#[test]
+fn formats_history_page() {
+    let entry = crate::codex_history::CodexHistoryEntry {
+        role: "assistant".to_string(),
+        text: "Done".to_string(),
+        timestamp: "2026-03-13T09:00:01Z".to_string(),
+    };
+
+    let page = format_history_page(
+        "kombez",
+        "019ce672-9445-7612-bc5e-c8243a0d1915",
+        1,
+        3,
+        &entry,
+    );
+
+    assert!(page.contains("**Session history**"));
+    assert!(page.contains("message: `2/3`"));
+    assert!(page.contains("role: `assistant`"));
+    assert!(page.contains("Done"));
 }
 
 #[test]
@@ -840,6 +941,9 @@ fn detects_commands_that_use_session_context() {
         BridgeCommand::Sessions
     )));
     assert!(!command_uses_session_context(&ParsedInput::Bridge(
+        BridgeCommand::History
+    )));
+    assert!(!command_uses_session_context(&ParsedInput::Bridge(
         BridgeCommand::Status
     )));
     assert!(!command_uses_session_context(&ParsedInput::Bridge(
@@ -851,6 +955,9 @@ fn detects_commands_that_use_session_context() {
 fn detects_commands_that_require_codex_auth() {
     assert!(!parsed_input_requires_codex_auth(&ParsedInput::Bridge(
         BridgeCommand::Status
+    )));
+    assert!(!parsed_input_requires_codex_auth(&ParsedInput::Bridge(
+        BridgeCommand::History
     )));
     assert!(parsed_input_requires_codex_auth(&ParsedInput::Bridge(
         BridgeCommand::Review(crate::models::ReviewRequest {
