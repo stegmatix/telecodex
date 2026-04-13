@@ -1,114 +1,114 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use tokio::process::Command;
-use transcribe_rs::{
-    SpeechModel, TranscribeOptions,
-    onnx::{Quantization, parakeet::ParakeetModel},
-};
-use uuid::Uuid;
+use reqwest::multipart::{Form, Part};
 
 use crate::models::AttachmentTranscript;
 
-const HANDY_MODEL_DIR_NAME: &str = "parakeet-tdt-0.6b-v3-int8";
+const DEFAULT_GROQ_MODEL: &str = "whisper-large-v3-turbo";
 
-pub fn detect_handy_parakeet_model_dir() -> Option<PathBuf> {
-    handy_model_roots()
-        .into_iter()
-        .map(|root| root.join(HANDY_MODEL_DIR_NAME))
-        .find(|candidate| is_valid_parakeet_model_dir(candidate))
+#[derive(Debug, Clone)]
+pub enum TranscriptionBackend {
+    Groq { api_key: String, model: String },
+}
+
+pub fn detect_transcription_backend() -> Option<TranscriptionBackend> {
+    if let Some(api_key) = std::env::var_os("GROQ_API_KEY") {
+        let api_key = api_key.to_string_lossy().trim().to_string();
+        if !api_key.is_empty() {
+            let model = std::env::var("GROQ_TRANSCRIPTION_MODEL")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_GROQ_MODEL.to_string());
+            return Some(TranscriptionBackend::Groq { api_key, model });
+        }
+    }
+    None
+}
+
+pub fn transcription_backend_label(backend: &TranscriptionBackend) -> &'static str {
+    match backend {
+        TranscriptionBackend::Groq { .. } => "Groq",
+    }
 }
 
 pub async fn transcribe_audio_file(
-    model_dir: PathBuf,
+    backend: &TranscriptionBackend,
     source_path: PathBuf,
-    scratch_dir: PathBuf,
+    _scratch_dir: PathBuf,
 ) -> Result<AttachmentTranscript> {
-    let wav_path = scratch_dir.join(format!("{}.wav", Uuid::now_v7()));
-    convert_audio_to_wav(&source_path, &wav_path).await?;
-
-    let wav_for_transcription = wav_path.clone();
-    let transcript_result = tokio::task::spawn_blocking(move || -> Result<AttachmentTranscript> {
-        let mut model = ParakeetModel::load(&model_dir, &Quantization::Int8)
-            .with_context(|| format!("failed to load Handy model from {}", model_dir.display()))?;
-        let result = model
-            .transcribe_file(&wav_for_transcription, &TranscribeOptions::default())
-            .with_context(|| format!("failed to transcribe {}", wav_for_transcription.display()))?;
-        let text = result.text.trim().to_string();
-        if text.is_empty() {
-            bail!("transcript is empty");
+    match backend {
+        TranscriptionBackend::Groq { api_key, model } => {
+            transcribe_audio_file_groq(api_key, model, source_path).await
         }
-        Ok(AttachmentTranscript {
-            engine: "Handy Parakeet".to_string(),
-            text,
-        })
-    })
-    .await
-    .context("audio transcription task join failed")?;
-
-    let _ = fs::remove_file(&wav_path);
-    transcript_result
+    }
 }
 
-async fn convert_audio_to_wav(source_path: &Path, wav_path: &Path) -> Result<()> {
-    let output = Command::new("ffmpeg")
-        .arg("-y")
-        .arg("-i")
-        .arg(source_path)
-        .arg("-ac")
-        .arg("1")
-        .arg("-ar")
-        .arg("16000")
-        .arg("-c:a")
-        .arg("pcm_s16le")
-        .arg(wav_path)
-        .output()
+async fn transcribe_audio_file_groq(
+    api_key: &str,
+    model: &str,
+    source_path: PathBuf,
+) -> Result<AttachmentTranscript> {
+    let file_name = normalized_upload_name(&source_path);
+    let bytes = tokio::fs::read(&source_path)
         .await
-        .with_context(|| format!("failed to spawn ffmpeg for {}", source_path.display()))?;
+        .with_context(|| format!("failed to read {}", source_path.display()))?;
+    let part = Part::bytes(bytes)
+        .file_name(file_name)
+        .mime_str("application/octet-stream")
+        .context("failed to build multipart upload")?;
+    let form = Form::new()
+        .part("file", part)
+        .text("model", model.to_string())
+        .text("response_format", "text".to_string());
 
-    if output.status.success() {
-        return Ok(());
+    let response = reqwest::Client::new()
+        .post("https://api.groq.com/openai/v1/audio/transcriptions")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await
+        .context("groq transcription request failed")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read groq transcription response")?;
+    if !status.is_success() {
+        bail!("Groq API error {status}: {body}");
     }
-
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
-        bail!("ffmpeg exited with status {}", output.status);
+    let text = body.trim().to_string();
+    if text.is_empty() {
+        bail!("transcript is empty");
     }
-    bail!("ffmpeg exited with status {}: {stderr}", output.status);
+    Ok(AttachmentTranscript {
+        engine: format!("Groq ({model})"),
+        text,
+    })
 }
 
-fn handy_model_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        roots.push(
-            PathBuf::from(&appdata)
-                .join("com.pais.handy")
-                .join("models"),
-        );
+fn normalized_upload_name(source_path: &Path) -> String {
+    let filename = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("audio");
+    let suffix = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+    match suffix.as_deref() {
+        Some("oga") | Some("opus") => format!(
+            "{}.ogg",
+            source_path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("audio")
+        ),
+        _ => filename.to_string(),
     }
-    if let Some(local_appdata) = std::env::var_os("LOCALAPPDATA") {
-        roots.push(
-            PathBuf::from(local_appdata)
-                .join("Handy")
-                .join("resources")
-                .join("models"),
-        );
-    }
-    roots
-}
-
-fn is_valid_parakeet_model_dir(dir: &Path) -> bool {
-    [
-        "encoder-model.int8.onnx",
-        "decoder_joint-model.int8.onnx",
-        "nemo128.onnx",
-        "vocab.txt",
-    ]
-    .iter()
-    .all(|name| dir.join(name).is_file())
 }
 
 #[cfg(test)]
@@ -116,8 +116,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_incomplete_model_dir() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(!is_valid_parakeet_model_dir(temp.path()));
+    fn normalizes_groq_upload_extension_for_telegram_audio() {
+        assert_eq!(
+            normalized_upload_name(Path::new("/tmp/voice.oga")),
+            "voice.ogg"
+        );
+        assert_eq!(
+            normalized_upload_name(Path::new("/tmp/voice.opus")),
+            "voice.ogg"
+        );
+        assert_eq!(
+            normalized_upload_name(Path::new("/tmp/voice.ogg")),
+            "voice.ogg"
+        );
     }
 }

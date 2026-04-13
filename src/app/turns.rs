@@ -1,6 +1,7 @@
 use super::presentation::{approval_waiting_text, request_telegram_approval};
 use super::support::{is_message_not_modified, session_title_is_present, telegram_retry_after};
 use super::*;
+use crate::transcribe::transcribe_audio_file;
 use std::path::Path;
 use uuid::Uuid;
 
@@ -565,7 +566,7 @@ async fn enrich_audio_transcripts(
     workspace: &TurnWorkspace,
     sink: &Arc<Mutex<LiveTurnSink>>,
 ) {
-    let Some(model_dir) = shared.handy_model_dir.clone() else {
+    let Some(backend) = shared.transcription_backend.clone() else {
         return;
     };
 
@@ -596,20 +597,16 @@ async fn enrich_audio_transcripts(
         .enumerate()
     {
         let label = format!(
-            "Transcribing audio {}/{} with Handy model...",
+            "Transcribing audio {}/{} with {}...",
             idx + 1,
-            total
+            total,
+            crate::transcribe::transcription_backend_label(&backend)
         );
         if let Err(error) = sink.lock().await.set_progress(label).await {
             tracing::debug!("failed to update transcription progress: {error:#}");
         }
 
-        match transcribe_audio_file(
-            model_dir.clone(),
-            attachment.path.clone(),
-            workspace.root.clone(),
-        )
-        .await
+        match transcribe_audio_file(&backend, attachment.path.clone(), workspace.root.clone()).await
         {
             Ok(transcript) => {
                 attachment.transcript = Some(transcript);

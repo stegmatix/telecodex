@@ -81,8 +81,8 @@ No webhook infrastructure. No browser dependency. No cloud relay between Telegra
 
 ### Audio transcription
 
-- Optional audio transcription via `ffmpeg` + `transcribe-rs`.
-- Auto-detects a local Handy Parakeet model directory when present.
+- Optional audio transcription via Groq Whisper.
+- If `GROQ_API_KEY` is set, Telecodex transcribes audio and voice attachments before sending the turn to Codex.
 - If transcription succeeds, the transcript is appended to the user prompt.
 
 ### Access control and safety
@@ -180,7 +180,33 @@ These commands require an active Codex login. If the local Codex CLI is not auth
 ### Optional but recommended
 
 - `ffmpeg` for audio/video conversion
-- a local Handy Parakeet model for speech transcription
+
+## 🍴 Maintaining Your Fork
+
+If you plan to run Telecodex in production and keep local changes, the clean setup is:
+
+1. Fork the upstream repo on GitHub.
+2. Keep remotes in the standard shape:
+   - `origin` → your fork
+   - `upstream` → `Headcrab/telecodex`
+3. Commit only reusable code and docs changes.
+4. Keep machine-local runtime files out of git:
+   - `telecodex.toml`
+   - `.env`
+   - `telecodex.sqlite3`
+   - `telecodex.log`
+   - `tmp/`
+
+Suggested sync flow:
+
+```bash
+git fetch upstream
+git checkout master
+git rebase upstream/master
+git push --force-with-lease origin master
+```
+
+Use short feature branches for changes you want to keep or upstream later.
 
 ## 🚀 Quick start
 
@@ -277,6 +303,8 @@ Telecodex will start `codex login --device-auth`, send a clickable `auth.openai.
 ### Environment variables
 
 - `TELEGRAM_BOT_TOKEN`: Telegram Bot API token.
+- `GROQ_API_KEY`: enables Groq Whisper transcription for audio and voice messages.
+- `GROQ_TRANSCRIPTION_MODEL`: optional override for the Groq model, defaults to `whisper-large-v3-turbo`.
 - `TELECODEX_RESTART_DELAY_MS`: optional startup delay before boot.
 
 ## 📁 Project layout

@@ -54,7 +54,7 @@ use crate::{
         SendMessage, TelegramClient, TelegramError, is_foreign_bot_command, normalize_command,
         preferred_image_file_id,
     },
-    transcribe::{detect_handy_parakeet_model_dir, transcribe_audio_file},
+    transcribe::{TranscriptionBackend, detect_transcription_backend, transcription_backend_label},
 };
 
 use self::{auth::*, presentation::*, support::*, turns::*};
@@ -72,7 +72,7 @@ struct AppShared {
     codex: CodexRunner,
     bot_username: Option<String>,
     service_user_id: i64,
-    handy_model_dir: Option<PathBuf>,
+    transcription_backend: Option<TranscriptionBackend>,
     session_defaults: SessionDefaults,
     limits_cache: Mutex<Option<CachedLimitsSnapshot>>,
     history_page_cache: Mutex<HistoryPageCache>,
@@ -195,7 +195,13 @@ impl App {
         let token = config.telegram.resolve_token()?;
         let telegram = TelegramClient::new(token, config.telegram.api_base.clone());
         let me = telegram.get_me().await.context("telegram getMe failed")?;
-        let handy_model_dir = detect_handy_parakeet_model_dir();
+        let transcription_backend = detect_transcription_backend();
+        if let Some(backend) = &transcription_backend {
+            tracing::info!(
+                "audio transcription enabled via {}",
+                transcription_backend_label(backend)
+            );
+        }
         let session_defaults = SessionDefaults::from(&config.codex);
         let store = Store::open(
             &config.db_path,
@@ -213,7 +219,7 @@ impl App {
                 codex,
                 bot_username: me.username,
                 service_user_id,
-                handy_model_dir,
+                transcription_backend,
                 session_defaults,
                 limits_cache: Mutex::new(None),
                 history_page_cache: Mutex::new(HistoryPageCache::default()),
