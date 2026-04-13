@@ -217,6 +217,8 @@ git clone https://github.com/Headcrab/telecodex.git
 cd telecodex
 ```
 
+If you plan to keep your own patches, clone your fork instead of upstream.
+
 ### 2. Create the config
 
 ```bash
@@ -227,10 +229,10 @@ This creates `telecodex.toml` from `telecodex.toml.example` if it does not exist
 
 ### 3. Set your Telegram bot token
 
-Set `TELEGRAM_BOT_TOKEN` in your environment before launch. Example:
+Set `TELECODEX_TELEGRAM_BOT_TOKEN` in your environment before launch. Example:
 
 ```bash
-export TELEGRAM_BOT_TOKEN="123456:replace-me"
+export TELECODEX_TELEGRAM_BOT_TOKEN="123456:replace-me"
 ```
 
 ### 4. Edit `telecodex.toml`
@@ -246,7 +248,7 @@ max_text_chunk = 3500
 tmp_dir = "/absolute/path/to/telecodex/tmp"
 
 [telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
+bot_token_env = "TELECODEX_TELEGRAM_BOT_TOKEN"
 api_base = "https://api.telegram.org"
 use_message_drafts = true
 
@@ -269,6 +271,8 @@ default_add_dirs = ["/absolute/path/to/workspace"]
 ```bash
 task run
 ```
+
+For long-lived local operation, prefer `tmux` or `systemd --user`.
 
 ### 6. Log in to Codex from Telegram
 
@@ -302,7 +306,7 @@ Telecodex will start `codex login --device-auth`, send a clickable `auth.openai.
 
 ### Environment variables
 
-- `TELEGRAM_BOT_TOKEN`: Telegram Bot API token.
+- `TELECODEX_TELEGRAM_BOT_TOKEN`: Telegram Bot API token.
 - `GROQ_API_KEY`: enables Groq Whisper transcription for audio and voice messages.
 - `GROQ_TRANSCRIPTION_MODEL`: optional override for the Groq model, defaults to `whisper-large-v3-turbo`.
 - `TELECODEX_RESTART_DELAY_MS`: optional startup delay before boot.

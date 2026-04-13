@@ -1,3 +1,8 @@
+# Local runtime config. Copy to telecodex.toml and keep it out of git.
+# Configure startup_admin_ids and the Telegram token source for your machine.
+# If your host has a broken sandbox runtime, you can temporarily use:
+# default_sandbox = "danger-full-access"
+
 db_path = "telecodex.sqlite3"
 startup_admin_ids = [123456789]
 poll_timeout_seconds = 30
@@ -6,7 +11,7 @@ max_text_chunk = 3500
 tmp_dir = "/absolute/path/to/telecodex/tmp"
 
 [telegram]
-bot_token_env = "TELEGRAM_BOT_TOKEN"
+bot_token_env = "TELECODEX_TELEGRAM_BOT_TOKEN"
 api_base = "https://api.telegram.org"
 use_message_drafts = true
 primary_forum_chat_id = -1001234567890
