@@ -186,8 +186,8 @@ pub(super) fn ensure_sandbox_mode(value: &str) -> Result<()> {
 pub(super) fn normalize_reasoning_effort(value: &str) -> Result<String> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "minimal" | "low" | "medium" | "high" => Ok(normalized),
-        _ => bail!("/think <minimal|low|medium|high|default>"),
+        "minimal" | "low" | "medium" | "high" | "xhigh" => Ok(normalized),
+        _ => bail!("/think <minimal|low|medium|high|xhigh|default>"),
     }
 }
 

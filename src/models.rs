@@ -81,6 +81,8 @@ pub struct TurnRequest {
     pub attachments: Vec<LocalAttachment>,
     pub review_mode: Option<ReviewRequest>,
     pub override_search_mode: Option<SearchMode>,
+    pub guest_query_id: Option<String>,
+    pub guest_inline_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

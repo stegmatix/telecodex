@@ -1478,6 +1478,8 @@ mod tests {
                 prompt: Some("focus on regressions".to_string()),
             }),
             override_search_mode: None,
+            guest_query_id: None,
+            guest_inline_message_id: None,
         }
     }
 

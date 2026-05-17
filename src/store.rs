@@ -652,8 +652,8 @@ mod tests {
     fn defaults() -> SessionDefaults {
         SessionDefaults {
             cwd: std::env::current_dir().unwrap(),
-            model: Some("gpt-5.4".to_string()),
-            reasoning_effort: Some("medium".to_string()),
+            model: Some("gpt-5.5".to_string()),
+            reasoning_effort: Some("xhigh".to_string()),
             session_prompt: None,
             sandbox_mode: "read-only".to_string(),
             approval_policy: "never".to_string(),
@@ -697,6 +697,8 @@ mod tests {
                 prompt: None,
             }),
             override_search_mode: None,
+            guest_query_id: None,
+            guest_inline_message_id: None,
         };
         let turn_id = store.record_turn_started(session.id, &request).unwrap();
         store

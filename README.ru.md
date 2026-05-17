@@ -144,7 +144,7 @@ Telegram chat/topic
 | `/status` | Показать текущую Telegram-сессию, выбранную Codex-сессию и runtime-настройки |
 | `/stop` | Остановить активный ход |
 | `/model [model\|default\|-]` | Поставить или показать модель |
-| `/think [minimal\|low\|medium\|high\|default\|-]` | Поставить или показать reasoning effort |
+| `/think [minimal\|low\|medium\|high\|xhigh\|default\|-]` | Поставить или показать reasoning effort |
 | `/prompt [text\|clear\|default\|-]` | Поставить или очистить постоянный session prompt |
 | `/approval <never\|on-request\|untrusted>` | Поставить approval policy |
 | `/sandbox <read-only\|workspace-write\|danger-full-access>` | Поставить sandbox mode |
@@ -255,8 +255,8 @@ use_message_drafts = true
 [codex]
 binary = "codex"
 default_cwd = "/absolute/path/to/telecodex"
-default_model = "gpt-5.4"
-default_reasoning_effort = "medium"
+default_model = "gpt-5.5"
+default_reasoning_effort = "xhigh"
 default_sandbox = "workspace-write"
 default_approval = "never"
 default_search_mode = "disabled"

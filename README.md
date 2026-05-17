@@ -144,7 +144,7 @@ High-level flow:
 | `/status` | Show the current Telegram session, selected Codex session, and runtime settings |
 | `/stop` | Stop the active turn |
 | `/model [model\|default\|-]` | Set or show the current model |
-| `/think [minimal\|low\|medium\|high\|default\|-]` | Set or show reasoning effort |
+| `/think [minimal\|low\|medium\|high\|xhigh\|default\|-]` | Set or show reasoning effort |
 | `/prompt [text\|clear\|default\|-]` | Set or clear the persistent session prompt |
 | `/approval <never\|on-request\|untrusted>` | Set approval policy |
 | `/sandbox <read-only\|workspace-write\|danger-full-access>` | Set sandbox mode |
@@ -255,8 +255,8 @@ use_message_drafts = true
 [codex]
 binary = "codex"
 default_cwd = "/absolute/path/to/telecodex"
-default_model = "gpt-5.4"
-default_reasoning_effort = "medium"
+default_model = "gpt-5.5"
+default_reasoning_effort = "xhigh"
 default_sandbox = "workspace-write"
 default_approval = "never"
 default_search_mode = "disabled"

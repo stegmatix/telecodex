@@ -25,8 +25,8 @@ fn sample_turn_workspace() -> TurnWorkspace {
 fn sample_defaults() -> SessionDefaults {
     SessionDefaults {
         cwd: sample_workspace(),
-        model: Some("gpt-5.4".to_string()),
-        reasoning_effort: Some("medium".to_string()),
+        model: Some("gpt-5.5".to_string()),
+        reasoning_effort: Some("xhigh".to_string()),
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -44,6 +44,8 @@ fn sample_turn_request(session_key: SessionKey) -> TurnRequest {
         attachments: vec![],
         review_mode: None,
         override_search_mode: None,
+        guest_query_id: None,
+        guest_inline_message_id: None,
     }
 }
 
@@ -702,12 +704,12 @@ fn builds_import_button_for_seed_environment() {
 
 #[test]
 fn builds_model_quick_commands_from_current_and_default() {
-    let commands = model_quick_commands(&[], Some("gpt-5.4"), Some("gpt-5"));
+    let commands = model_quick_commands(&[], Some("gpt-5.4"), Some("gpt-5.5"));
 
     assert_eq!(
         commands,
         vec![
-            vec!["/model gpt-5.4".to_string(), "/model gpt-5".to_string()],
+            vec!["/model gpt-5.4".to_string(), "/model gpt-5.5".to_string()],
             vec!["/model default".to_string()],
         ]
     );
@@ -715,12 +717,12 @@ fn builds_model_quick_commands_from_current_and_default() {
 
 #[test]
 fn deduplicates_model_quick_commands_when_current_matches_default() {
-    let commands = model_quick_commands(&[], Some("gpt-5.4"), Some("gpt-5.4"));
+    let commands = model_quick_commands(&[], Some("gpt-5.5"), Some("gpt-5.5"));
 
     assert_eq!(
         commands,
         vec![vec![
-            "/model gpt-5.4".to_string(),
+            "/model gpt-5.5".to_string(),
             "/model default".to_string(),
         ]]
     );
@@ -731,8 +733,8 @@ fn includes_catalog_models_in_model_quick_commands() {
     let commands = model_quick_commands(
         &[
             AvailableModel {
-                id: "gpt-5.4".to_string(),
-                display_name: Some("gpt-5.4".to_string()),
+                id: "gpt-5.5".to_string(),
+                display_name: Some("gpt-5.5".to_string()),
                 description: None,
                 is_default: true,
             },
@@ -743,7 +745,7 @@ fn includes_catalog_models_in_model_quick_commands() {
                 is_default: false,
             },
         ],
-        Some("gpt-5.4"),
+        Some("gpt-5.5"),
         None,
     );
 
@@ -751,7 +753,7 @@ fn includes_catalog_models_in_model_quick_commands() {
         commands,
         vec![
             vec![
-                "/model gpt-5.4".to_string(),
+                "/model gpt-5.5".to_string(),
                 "/model gpt-5.3-codex".to_string(),
             ],
             vec!["/model default".to_string()],
@@ -762,11 +764,11 @@ fn includes_catalog_models_in_model_quick_commands() {
 #[test]
 fn formats_model_help_text_from_catalog() {
     let text = format_model_help_text(
-        "gpt-5.4",
+        "gpt-5.5",
         &[
             AvailableModel {
-                id: "gpt-5.4".to_string(),
-                display_name: Some("gpt-5.4".to_string()),
+                id: "gpt-5.5".to_string(),
+                display_name: Some("gpt-5.5".to_string()),
                 description: None,
                 is_default: true,
             },
@@ -779,8 +781,8 @@ fn formats_model_help_text_from_catalog() {
         ],
     );
 
-    assert!(text.contains("Current model: `gpt-5.4`"));
-    assert_eq!(text, "Current model: `gpt-5.4`");
+    assert!(text.contains("Current model: `gpt-5.5`"));
+    assert_eq!(text, "Current model: `gpt-5.5`");
 }
 
 #[test]
@@ -958,6 +960,8 @@ fn keeps_audio_transcript_in_user_prompt_only() {
         }],
         review_mode: None,
         override_search_mode: None,
+        guest_query_id: None,
+        guest_inline_message_id: None,
     };
 
     let runtime_request = prepare_runtime_request(&session, &request, &workspace);
@@ -1013,6 +1017,8 @@ fn keeps_non_transcribed_audio_paths_in_user_prompt() {
         }],
         review_mode: None,
         override_search_mode: None,
+        guest_query_id: None,
+        guest_inline_message_id: None,
     };
 
     let runtime_request = prepare_runtime_request(&session, &request, &workspace);

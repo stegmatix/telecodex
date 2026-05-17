@@ -50,9 +50,9 @@ use crate::{
     render::{render_markdown_to_html, split_text},
     store::{SessionDefaults, Store},
     telegram::{
-        ChatAction, EditMessageText, InlineKeyboardButton, InlineKeyboardMarkup, Message,
-        SendMessage, TelegramClient, TelegramError, is_foreign_bot_command, normalize_command,
-        preferred_image_file_id,
+        ChatAction, EditInlineMessageText, EditMessageText, InlineKeyboardButton,
+        InlineKeyboardMarkup, InlineQueryResultArticle, Message, SendMessage, TelegramClient,
+        TelegramError, is_foreign_bot_command, normalize_command, preferred_image_file_id,
     },
     transcribe::{TranscriptionBackend, detect_transcription_backend, transcription_backend_label},
 };
@@ -195,6 +195,9 @@ impl App {
         let token = config.telegram.resolve_token()?;
         let telegram = TelegramClient::new(token, config.telegram.api_base.clone());
         let me = telegram.get_me().await.context("telegram getMe failed")?;
+        if me.supports_guest_queries == Some(true) {
+            tracing::info!("telegram guest mode is enabled for this bot");
+        }
         let transcription_backend = detect_transcription_backend();
         if let Some(backend) = &transcription_backend {
             tracing::info!(
@@ -309,6 +312,10 @@ impl App {
             self.process_callback_query(callback).await?;
             return Ok(());
         }
+        if let Some(message) = update.guest_message {
+            self.process_guest_message(message).await?;
+            return Ok(());
+        }
         let Some(message) = update.message else {
             return Ok(());
         };
@@ -390,9 +397,184 @@ impl App {
             attachments,
             review_mode: None,
             override_search_mode: auto_search_mode_for_prompt(text),
+            guest_query_id: None,
+            guest_inline_message_id: None,
         };
         self.enqueue_turn(request, &message.chat.kind).await?;
         Ok(())
+    }
+
+    async fn process_guest_message(&self, message: Message) -> Result<()> {
+        let Some(guest_query_id) = message.guest_query_id.as_deref() else {
+            return Ok(());
+        };
+        let Some(from) = message
+            .guest_bot_caller_user
+            .as_ref()
+            .or(message.from.as_ref())
+        else {
+            self.answer_guest_query_markdown(guest_query_id, "Access denied.")
+                .await
+                .ok();
+            return Ok(());
+        };
+        if from.is_bot {
+            return Ok(());
+        }
+
+        let user = self.shared.store.get_user(from.id)?;
+        let Some(user) = user.filter(|user| user.allowed) else {
+            self.shared.store.audit(
+                Some(from.id),
+                "guest_access_denied",
+                serde_json::json!({
+                    "chat_id": message.chat.id,
+                    "caller_chat_id": message.guest_bot_caller_chat.as_ref().map(|chat| chat.id),
+                }),
+            )?;
+            self.answer_guest_query_markdown(guest_query_id, "Access denied.")
+                .await?;
+            return Ok(());
+        };
+
+        let text = message
+            .text
+            .as_deref()
+            .or(message.caption.as_deref())
+            .unwrap_or("")
+            .trim();
+        if normalize_command(text, self.shared.bot_username.as_deref()).is_some() {
+            self.answer_guest_query_markdown(
+                guest_query_id,
+                "Guest mode accepts prompts only. Open a direct chat with the bot for commands.",
+            )
+            .await?;
+            return Ok(());
+        }
+        if text.is_empty() && !message_has_supported_attachment(&message) {
+            self.answer_guest_query_markdown(
+                guest_query_id,
+                "Send a text prompt when mentioning the bot.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let auth_status = self.shared.codex.auth_status().await?;
+        if !auth_status.authenticated {
+            self.answer_guest_query_markdown(
+                guest_query_id,
+                "Codex is not logged in. Open a direct chat with the bot and run `/login` first.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let session_key = guest_session_key(from.id, message.guest_bot_caller_chat.as_ref());
+        let session = self.ensure_session(session_key, from.id)?;
+        let session = self.resolve_session_codex_binding(session)?;
+        let session = self.maybe_assign_session_title_from_text(session, text)?;
+        let inline_message_id = self
+            .answer_guest_query_html(guest_query_id, "<i>⏳</i>".to_string())
+            .await?;
+        let attachments = match self.download_attachments(&message, &session).await {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                self.edit_guest_inline_markdown(
+                    &inline_message_id,
+                    &format!("Failed to download attachments: {error:#}"),
+                )
+                .await
+                .ok();
+                return Err(error);
+            }
+        };
+
+        let prompt = if !text.is_empty() {
+            text.to_string()
+        } else {
+            "Analyze the attached files.".to_string()
+        };
+        let request = TurnRequest {
+            session_key,
+            from_user_id: user.tg_user_id,
+            prompt,
+            runtime_instructions: None,
+            attachments,
+            review_mode: None,
+            override_search_mode: auto_search_mode_for_prompt(text),
+            guest_query_id: Some(guest_query_id.to_string()),
+            guest_inline_message_id: Some(inline_message_id.clone()),
+        };
+        if let Err(error) = self.enqueue_turn(request, "guest").await {
+            self.edit_guest_inline_markdown(
+                &inline_message_id,
+                &format!("Failed to enqueue turn: {error:#}"),
+            )
+            .await
+            .ok();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn answer_guest_query_markdown(
+        &self,
+        guest_query_id: &str,
+        markdown: &str,
+    ) -> Result<String> {
+        self.answer_guest_query_html(guest_query_id, render_markdown_to_html(markdown))
+            .await
+    }
+
+    async fn answer_guest_query_html(&self, guest_query_id: &str, html: String) -> Result<String> {
+        let sent = self
+            .shared
+            .telegram
+            .answer_guest_query(
+                guest_query_id,
+                InlineQueryResultArticle::html(
+                    Uuid::now_v7().simple().to_string(),
+                    "Telecodex".to_string(),
+                    html,
+                ),
+            )
+            .await?;
+        Ok(sent.inline_message_id)
+    }
+
+    async fn edit_guest_inline_markdown(
+        &self,
+        inline_message_id: &str,
+        markdown: &str,
+    ) -> Result<()> {
+        let html = render_markdown_to_html(markdown);
+        match self
+            .shared
+            .telegram
+            .edit_inline_message_text(EditInlineMessageText::html(
+                inline_message_id.to_string(),
+                html,
+            ))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if is_message_not_modified(&error) {
+                    return Ok(());
+                }
+                let fallback = html_escape::encode_safe(markdown).to_string();
+                self.shared
+                    .telegram
+                    .edit_inline_message_text(EditInlineMessageText::html(
+                        inline_message_id.to_string(),
+                        fallback,
+                    ))
+                    .await
+                    .map(|_| ())
+                    .with_context(|| format!("failed to edit guest message after: {error:#}"))
+            }
+        }
     }
 
     async fn process_callback_query(&self, callback: crate::telegram::CallbackQuery) -> Result<()> {
@@ -610,6 +792,8 @@ impl App {
                     override_search_mode: auto_search_mode_for_prompt(
                         message.text.as_deref().unwrap_or(""),
                     ),
+                    guest_query_id: None,
+                    guest_inline_message_id: None,
                 };
                 self.enqueue_turn(request, &message.chat.kind).await?;
             }
@@ -691,6 +875,8 @@ impl App {
                         attachments: vec![],
                         review_mode: Some(review),
                         override_search_mode: None,
+                        guest_query_id: None,
+                        guest_inline_message_id: None,
                     };
                     self.enqueue_turn(request, &message.chat.kind).await?;
                 }
@@ -1048,7 +1234,7 @@ impl App {
                                 quick_commands: vec![
                                     vec!["/think minimal".to_string(), "/think low".to_string()],
                                     vec!["/think medium".to_string(), "/think high".to_string()],
-                                    vec!["/think default".to_string()],
+                                    vec!["/think xhigh".to_string(), "/think default".to_string()],
                                 ],
                             },
                         )
@@ -1667,6 +1853,32 @@ fn history_callback_matches_current_session(
     requested_thread_id: &str,
 ) -> bool {
     session.codex_thread_id.as_deref() == Some(requested_thread_id)
+}
+
+fn message_has_supported_attachment(message: &Message) -> bool {
+    !message.photo.is_empty()
+        || message.document.is_some()
+        || message.audio.is_some()
+        || message.voice.is_some()
+        || message.video.is_some()
+}
+
+fn guest_session_key(
+    caller_user_id: i64,
+    caller_chat: Option<&crate::telegram::Chat>,
+) -> SessionKey {
+    let seed = match caller_chat {
+        Some(chat) => format!(
+            "telecodex-guest-chat:{}:{}:{}",
+            chat.kind, chat.id, caller_user_id
+        ),
+        None => format!("telecodex-guest-user:{caller_user_id}"),
+    };
+    let uuid = Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes());
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&uuid.as_bytes()[..8]);
+    let raw = (u64::from_be_bytes(bytes) & 0x3fff_ffff_ffff_ffff).max(1) as i64;
+    SessionKey::new(-raw, None)
 }
 
 fn format_stale_history_page(

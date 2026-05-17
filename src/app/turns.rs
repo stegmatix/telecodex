@@ -1,6 +1,7 @@
 use super::presentation::{approval_waiting_text, request_telegram_approval};
 use super::support::{is_message_not_modified, session_title_is_present, telegram_retry_after};
 use super::*;
+use crate::telegram::{EditInlineMessageText, SendMessageDraft};
 use crate::transcribe::transcribe_audio_file;
 use std::path::Path;
 use uuid::Uuid;
@@ -24,52 +25,59 @@ pub(super) async fn process_turn(
 
     let cancel = CancellationToken::new();
     *cancel_slot.lock().expect("cancel mutex poisoned") = Some(cancel.clone());
-    let chat_action_task = spawn_chat_action_task(
-        shared.telegram.clone(),
-        session.key.chat_id,
-        Some(session.key.thread_id).filter(|value| *value != 0),
-        cancel.clone(),
-    );
+    let thread_id = Some(session.key.thread_id).filter(|value| *value != 0);
+    let is_guest_turn =
+        queued.request.guest_inline_message_id.is_some() || queued.request.guest_query_id.is_some();
+    let chat_action_task = if is_guest_turn {
+        None
+    } else {
+        Some(spawn_chat_action_task(
+            shared.telegram.clone(),
+            session.key.chat_id,
+            thread_id,
+            cancel.clone(),
+        ))
+    };
     let limits_inline = latest_limits_snapshot_from_shared(&shared)
         .await?
         .and_then(|snapshot| format_limits_inline(&snapshot));
     let thinking_text = "⏳";
     let placeholder_text = render_placeholder_html(thinking_text, limits_inline.as_deref());
-
-    if shared.config.telegram.use_message_drafts && queued.chat_kind == "private" {
-        if let Err(error) = shared
+    let sink = if let Some(inline_message_id) = queued.request.guest_inline_message_id.clone() {
+        Arc::new(Mutex::new(LiveTurnSink::new_guest(
+            shared.clone(),
+            &session,
+            limits_inline,
+            inline_message_id,
+        )))
+    } else if shared.config.telegram.use_message_drafts && queued.chat_kind == "private" {
+        match shared
             .telegram
-            .send_message_draft(
+            .send_message_draft(SendMessageDraft::html(
                 session.key.chat_id,
-                Some(session.key.thread_id).filter(|id| *id != 0),
-                thinking_text,
-            )
+                thread_id,
+                turn_id,
+                placeholder_text.clone(),
+            ))
             .await
         {
-            tracing::debug!(
-                "sendMessageDraft failed, falling back to placeholder message: {error:#}"
-            );
+            Ok(_) => Arc::new(Mutex::new(LiveTurnSink::new_draft(
+                shared.clone(),
+                &session,
+                limits_inline,
+                turn_id,
+            ))),
+            Err(error) => {
+                tracing::debug!(
+                    "sendMessageDraft failed, falling back to placeholder message: {error:#}"
+                );
+                create_preview_sink(shared.clone(), &session, limits_inline, placeholder_text)
+                    .await?
+            }
         }
-    }
-
-    let placeholder = shared
-        .telegram
-        .send_message(SendMessage::html(
-            session.key.chat_id,
-            Some(session.key.thread_id).filter(|value| *value != 0),
-            placeholder_text,
-        ))
-        .await
-        .context("failed to create placeholder message")?;
-    let sink = Arc::new(Mutex::new(LiveTurnSink::new(
-        shared.clone(),
-        &session,
-        limits_inline,
-        TelegramMessageRef {
-            chat_id: session.key.chat_id,
-            message_id: placeholder.message_id,
-        },
-    )));
+    } else {
+        create_preview_sink(shared.clone(), &session, limits_inline, placeholder_text).await?
+    };
     let mut runtime_request = queued.request.clone();
     enrich_audio_transcripts(&shared, &mut runtime_request, &turn_workspace, &sink).await;
     let runtime_request = prepare_runtime_request(&session, &runtime_request, &turn_workspace);
@@ -83,6 +91,7 @@ pub(super) async fn process_turn(
             let approval_cancel = cancel.clone();
             let requester_user_id = queued.request.from_user_id;
             let session_key = session.key;
+            let approvals_supported = !is_guest_turn;
             move |event| {
                 let sink = sink.clone();
                 let shared = shared.clone();
@@ -100,6 +109,11 @@ pub(super) async fn process_turn(
                                     "failed to update approval progress for {:?}: {error:#}",
                                     session_key
                                 );
+                            }
+                            if !approvals_supported {
+                                return Ok(CodexEventOutcome::Approval(
+                                    CodexApprovalDecision::Decline,
+                                ));
                             }
                             let decision = request_telegram_approval(
                                 shared,
@@ -124,7 +138,9 @@ pub(super) async fn process_turn(
 
     *cancel_slot.lock().expect("cancel mutex poisoned") = None;
     cancel.cancel();
-    let _ = chat_action_task.await;
+    if let Some(chat_action_task) = chat_action_task {
+        let _ = chat_action_task.await;
+    }
     let final_result = async {
         match run_result {
             Ok(summary) => {
@@ -140,8 +156,16 @@ pub(super) async fn process_turn(
                             summary: &summary,
                         },
                         || async {
-                            send_generated_artifacts(&shared, &session, &turn_workspace.out_dir)
+                            if is_guest_turn {
+                                Ok(())
+                            } else {
+                                send_generated_artifacts(
+                                    &shared,
+                                    &session,
+                                    &turn_workspace.out_dir,
+                                )
                                 .await
+                            }
                         },
                         || async move { sink_for_success.lock().await.finish(None).await },
                         |message| async move {
@@ -192,6 +216,32 @@ pub(super) async fn process_turn(
         &turn_workspace.root,
         final_result,
     )
+}
+
+async fn create_preview_sink(
+    shared: Arc<AppShared>,
+    session: &crate::models::SessionRecord,
+    limits_inline: Option<String>,
+    placeholder_text: String,
+) -> Result<Arc<Mutex<LiveTurnSink>>> {
+    let placeholder = shared
+        .telegram
+        .send_message(SendMessage::html(
+            session.key.chat_id,
+            Some(session.key.thread_id).filter(|value| *value != 0),
+            placeholder_text,
+        ))
+        .await
+        .context("failed to create placeholder message")?;
+    Ok(Arc::new(Mutex::new(LiveTurnSink::new(
+        shared,
+        session,
+        limits_inline,
+        TelegramMessageRef {
+            chat_id: session.key.chat_id,
+            message_id: placeholder.message_id,
+        },
+    ))))
 }
 
 fn cleanup_paths(attachments: &[LocalAttachment], turn_root: &Path) {
@@ -322,6 +372,8 @@ struct LiveTurnSink {
     shared: Arc<AppShared>,
     session_key: SessionKey,
     messages: Vec<TelegramMessageRef>,
+    draft_id: Option<i64>,
+    guest_inline_message_id: Option<String>,
     limits_inline: Option<String>,
     pending_text: String,
     has_assistant_text: bool,
@@ -341,6 +393,50 @@ impl LiveTurnSink {
             shared,
             session_key: session.key,
             messages: vec![placeholder],
+            draft_id: None,
+            guest_inline_message_id: None,
+            limits_inline,
+            pending_text: "⏳".to_string(),
+            has_assistant_text: false,
+            last_flushed_text: String::new(),
+            last_flush_at: Instant::now() - Duration::from_secs(60),
+            edit_backoff_until: None,
+        }
+    }
+
+    fn new_draft(
+        shared: Arc<AppShared>,
+        session: &crate::models::SessionRecord,
+        limits_inline: Option<String>,
+        draft_id: i64,
+    ) -> Self {
+        Self {
+            shared,
+            session_key: session.key,
+            messages: Vec::new(),
+            draft_id: Some(draft_id),
+            guest_inline_message_id: None,
+            limits_inline,
+            pending_text: "⏳".to_string(),
+            has_assistant_text: false,
+            last_flushed_text: String::new(),
+            last_flush_at: Instant::now() - Duration::from_secs(60),
+            edit_backoff_until: None,
+        }
+    }
+
+    fn new_guest(
+        shared: Arc<AppShared>,
+        session: &crate::models::SessionRecord,
+        limits_inline: Option<String>,
+        inline_message_id: String,
+    ) -> Self {
+        Self {
+            shared,
+            session_key: session.key,
+            messages: Vec::new(),
+            draft_id: None,
+            guest_inline_message_id: Some(inline_message_id),
             limits_inline,
             pending_text: "⏳".to_string(),
             has_assistant_text: false,
@@ -420,6 +516,13 @@ impl LiveTurnSink {
             return Ok(());
         }
 
+        if self.guest_inline_message_id.is_some() {
+            return self.flush_guest(force, &visible_text).await;
+        }
+        if self.draft_id.is_some() && !force {
+            return self.flush_draft(&visible_text).await;
+        }
+
         let chunks = if force {
             split_text(&visible_text, self.shared.config.max_text_chunk)
         } else {
@@ -453,6 +556,109 @@ impl LiveTurnSink {
         self.last_flushed_text = visible_text;
         self.last_flush_at = Instant::now();
         Ok(())
+    }
+
+    async fn flush_draft(&mut self, visible_text: &str) -> Result<()> {
+        let Some(draft_id) = self.draft_id else {
+            return Ok(());
+        };
+        let draft_text = truncate_for_live_update(visible_text, self.shared.config.max_text_chunk);
+        let html = render_markdown_to_html(&draft_text);
+        match self
+            .shared
+            .telegram
+            .send_message_draft(SendMessageDraft::html(
+                self.session_key.chat_id,
+                Some(self.session_key.thread_id).filter(|value| *value != 0),
+                draft_id,
+                html,
+            ))
+            .await
+        {
+            Ok(_) => {
+                self.last_flushed_text = visible_text.to_string();
+                self.last_flush_at = Instant::now();
+            }
+            Err(error) if self.defer_after_retry_after(&error, "telegram draft update") => {}
+            Err(error) => {
+                tracing::debug!("sendMessageDraft update failed: {error:#}");
+                self.last_flushed_text = visible_text.to_string();
+                self.last_flush_at = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
+    async fn flush_guest(&mut self, force: bool, visible_text: &str) -> Result<()> {
+        let Some(inline_message_id) = self.guest_inline_message_id.clone() else {
+            return Ok(());
+        };
+        let guest_text = self.guest_visible_text(force, visible_text);
+        let html = render_markdown_to_html(&guest_text);
+        let result = self
+            .shared
+            .telegram
+            .edit_inline_message_text(EditInlineMessageText::html(inline_message_id.clone(), html))
+            .await;
+        match result {
+            Ok(_) => {
+                self.last_flushed_text = visible_text.to_string();
+                self.last_flush_at = Instant::now();
+            }
+            Err(error) if is_message_not_modified(&error) => {
+                self.last_flushed_text = visible_text.to_string();
+                self.last_flush_at = Instant::now();
+            }
+            Err(error) if self.defer_after_retry_after(&error, "telegram guest edit") => {}
+            Err(error) => {
+                let fallback = html_escape::encode_safe(&guest_text).to_string();
+                match self
+                    .shared
+                    .telegram
+                    .edit_inline_message_text(EditInlineMessageText::html(
+                        inline_message_id,
+                        fallback,
+                    ))
+                    .await
+                {
+                    Ok(_) => {
+                        self.last_flushed_text = visible_text.to_string();
+                        self.last_flush_at = Instant::now();
+                    }
+                    Err(fallback_error) if is_message_not_modified(&fallback_error) => {
+                        self.last_flushed_text = visible_text.to_string();
+                        self.last_flush_at = Instant::now();
+                    }
+                    Err(fallback_error)
+                        if self.defer_after_retry_after(
+                            &fallback_error,
+                            "telegram guest fallback",
+                        ) => {}
+                    Err(fallback_error) => {
+                        tracing::debug!(
+                            "failed to edit guest message after fallback: {fallback_error:#}; original: {error:#}"
+                        );
+                        self.last_flushed_text = visible_text.to_string();
+                        self.last_flush_at = Instant::now();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn guest_visible_text(&self, force: bool, visible_text: &str) -> String {
+        let max_len = self.shared.config.max_text_chunk;
+        if !force {
+            return truncate_for_live_update(visible_text, max_len);
+        }
+        if visible_text.chars().count() <= max_len {
+            return visible_text.to_string();
+        }
+        let notice = "\n\n[Output truncated for guest reply. Open a direct chat with the bot for full output.]";
+        let body_len = max_len.saturating_sub(notice.chars().count()).max(1);
+        let body = truncate_for_live_update(visible_text, body_len);
+        truncate_for_live_update(&format!("{body}{notice}"), max_len)
     }
 
     fn visible_text(&self, force: bool) -> String {

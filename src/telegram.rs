@@ -44,7 +44,7 @@ impl TelegramClient {
             Some(&Payload {
                 offset,
                 timeout,
-                allowed_updates: vec!["message", "callback_query"],
+                allowed_updates: vec!["message", "callback_query", "guest_message"],
             }),
             Duration::from_secs(timeout as u64).saturating_add(TELEGRAM_GET_UPDATES_GRACE),
         )
@@ -254,28 +254,36 @@ impl TelegramClient {
         .await
     }
 
-    pub async fn send_message_draft(
+    pub async fn send_message_draft(&self, request: SendMessageDraft) -> Result<bool> {
+        self.post("sendMessageDraft", Some(&request)).await
+    }
+
+    pub async fn answer_guest_query(
         &self,
-        chat_id: i64,
-        message_thread_id: Option<i64>,
-        text: &str,
-    ) -> Result<bool> {
+        guest_query_id: &str,
+        result: InlineQueryResultArticle,
+    ) -> Result<SentGuestMessage> {
         #[derive(Serialize)]
         struct Payload<'a> {
-            chat_id: i64,
-            message_thread_id: Option<i64>,
-            text: &'a str,
+            guest_query_id: &'a str,
+            result: InlineQueryResultArticle,
         }
 
         self.post(
-            "sendMessageDraft",
+            "answerGuestQuery",
             Some(&Payload {
-                chat_id,
-                message_thread_id,
-                text,
+                guest_query_id,
+                result,
             }),
         )
         .await
+    }
+
+    pub async fn edit_inline_message_text(
+        &self,
+        request: EditInlineMessageText,
+    ) -> Result<serde_json::Value> {
+        self.post("editMessageText", Some(&request)).await
     }
 
     pub async fn get_file(&self, file_id: &str) -> Result<File> {
@@ -508,14 +516,18 @@ pub struct Update {
     pub update_id: i64,
     pub message: Option<Message>,
     pub callback_query: Option<CallbackQuery>,
+    pub guest_message: Option<Message>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Message {
     pub message_id: i64,
     pub message_thread_id: Option<i64>,
+    pub guest_query_id: Option<String>,
     pub from: Option<User>,
     pub chat: Chat,
+    pub guest_bot_caller_user: Option<User>,
+    pub guest_bot_caller_chat: Option<Chat>,
     pub text: Option<String>,
     pub caption: Option<String>,
     #[serde(default)]
@@ -541,6 +553,7 @@ pub struct User {
     #[allow(dead_code)]
     pub first_name: String,
     pub username: Option<String>,
+    pub supports_guest_queries: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -619,6 +632,19 @@ pub struct SendMessage {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SendMessageDraft {
+    pub chat_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
+    pub draft_id: i64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    pub parse_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_preview_options: Option<LinkPreviewOptions>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EditMessageText {
     pub chat_id: i64,
     pub message_id: i64,
@@ -628,6 +654,41 @@ pub struct EditMessageText {
     pub link_preview_options: Option<LinkPreviewOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_markup: Option<InlineKeyboardMarkup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EditInlineMessageText {
+    pub inline_message_id: String,
+    pub text: String,
+    pub parse_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_preview_options: Option<LinkPreviewOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_markup: Option<InlineKeyboardMarkup>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SentGuestMessage {
+    pub inline_message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InlineQueryResultArticle {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub id: String,
+    pub title: String,
+    pub input_message_content: InputTextMessageContent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_markup: Option<InlineKeyboardMarkup>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InputTextMessageContent {
+    pub message_text: String,
+    pub parse_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_preview_options: Option<LinkPreviewOptions>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -683,6 +744,19 @@ impl SendMessage {
     }
 }
 
+impl SendMessageDraft {
+    pub fn html(chat_id: i64, thread_id: Option<i64>, draft_id: i64, text: String) -> Self {
+        Self {
+            chat_id,
+            message_thread_id: thread_id,
+            draft_id,
+            text,
+            parse_mode: "HTML".to_string(),
+            link_preview_options: Some(LinkPreviewOptions { is_disabled: true }),
+        }
+    }
+}
+
 impl EditMessageText {
     pub fn html(chat_id: i64, message_id: i64, text: String) -> Self {
         Self {
@@ -691,6 +765,34 @@ impl EditMessageText {
             text,
             parse_mode: "HTML".to_string(),
             link_preview_options: Some(LinkPreviewOptions { is_disabled: true }),
+            reply_markup: None,
+        }
+    }
+}
+
+impl EditInlineMessageText {
+    pub fn html(inline_message_id: String, text: String) -> Self {
+        Self {
+            inline_message_id,
+            text,
+            parse_mode: "HTML".to_string(),
+            link_preview_options: Some(LinkPreviewOptions { is_disabled: true }),
+            reply_markup: None,
+        }
+    }
+}
+
+impl InlineQueryResultArticle {
+    pub fn html(id: String, title: String, html: String) -> Self {
+        Self {
+            kind: "article",
+            id,
+            title,
+            input_message_content: InputTextMessageContent {
+                message_text: html,
+                parse_mode: "HTML".to_string(),
+                link_preview_options: Some(LinkPreviewOptions { is_disabled: true }),
+            },
             reply_markup: None,
         }
     }
@@ -753,6 +855,7 @@ pub fn preferred_image_file_id(message: &Message) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn detects_foreign_bot_command_mentions() {
@@ -765,5 +868,54 @@ mod tests {
             Some("telecodex_bot")
         ));
         assert!(!is_foreign_bot_command("/status", Some("telecodex_bot")));
+    }
+
+    #[test]
+    fn send_message_draft_payload_includes_draft_id() {
+        let payload = SendMessageDraft::html(42, Some(7), 123, "partial".to_string());
+        let value = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(value["chat_id"], 42);
+        assert_eq!(value["message_thread_id"], 7);
+        assert_eq!(value["draft_id"], 123);
+        assert_eq!(value["text"], "partial");
+        assert_eq!(value["parse_mode"], "HTML");
+    }
+
+    #[test]
+    fn deserializes_guest_message_update() {
+        let update: Update = serde_json::from_value(json!({
+            "update_id": 10,
+            "guest_message": {
+                "message_id": 20,
+                "guest_query_id": "guest-query-1",
+                "from": {
+                    "id": 100,
+                    "is_bot": false,
+                    "first_name": "Anton"
+                },
+                "chat": {
+                    "id": -200,
+                    "type": "group"
+                },
+                "guest_bot_caller_user": {
+                    "id": 101,
+                    "is_bot": false,
+                    "first_name": "Caller"
+                },
+                "guest_bot_caller_chat": {
+                    "id": -300,
+                    "type": "supergroup",
+                    "title": "Caller chat"
+                },
+                "text": "hello"
+            }
+        }))
+        .unwrap();
+
+        let message = update.guest_message.unwrap();
+        assert_eq!(message.guest_query_id.as_deref(), Some("guest-query-1"));
+        assert_eq!(message.guest_bot_caller_user.unwrap().id, 101);
+        assert_eq!(message.guest_bot_caller_chat.unwrap().id, -300);
     }
 }

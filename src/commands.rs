@@ -183,6 +183,7 @@ pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
                 "/think low",
                 "/think medium",
                 "/think high",
+                "/think xhigh",
                 "/think default",
             ],
         )),
@@ -391,10 +392,10 @@ mod tests {
 
     #[test]
     fn parses_think_and_prompt_commands() {
-        let think = parse_command("/think", "high", "/think high").unwrap();
+        let think = parse_command("/think", "xhigh", "/think xhigh").unwrap();
         match think {
             ParsedInput::Bridge(BridgeCommand::Think { level }) => {
-                assert_eq!(level.as_deref(), Some("high"));
+                assert_eq!(level.as_deref(), Some("xhigh"));
             }
             _ => panic!("unexpected think variant"),
         }
@@ -468,8 +469,8 @@ mod tests {
             ("/topic test", ParsedInputKind::Bridge),
             ("/cd /workspace/project", ParsedInputKind::Bridge),
             ("/pwd", ParsedInputKind::Bridge),
-            ("/model gpt-5.4", ParsedInputKind::Bridge),
-            ("/think high", ParsedInputKind::Bridge),
+            ("/model gpt-5.5", ParsedInputKind::Bridge),
+            ("/think xhigh", ParsedInputKind::Bridge),
             ("/prompt be concise", ParsedInputKind::Bridge),
             ("/approval never", ParsedInputKind::Bridge),
             ("/sandbox workspace-write", ParsedInputKind::Bridge),
