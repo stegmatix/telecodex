@@ -485,6 +485,7 @@ impl LiveTurnSink {
                 format!("{}\n\n{}", self.pending_text, final_error)
             };
         }
+        self.clear_draft_before_final_message().await;
         self.flush(true).await
     }
 
@@ -587,6 +588,26 @@ impl LiveTurnSink {
             }
         }
         Ok(())
+    }
+
+    async fn clear_draft_before_final_message(&mut self) {
+        let Some(draft_id) = self.draft_id.take() else {
+            return;
+        };
+        let result = self
+            .shared
+            .telegram
+            .send_message_draft(SendMessageDraft::html(
+                self.session_key.chat_id,
+                Some(self.session_key.thread_id).filter(|value| *value != 0),
+                draft_id,
+                String::new(),
+            ))
+            .await;
+        match result {
+            Ok(_) => tracing::debug!("cleared Telegram draft {draft_id}"),
+            Err(error) => tracing::debug!("failed to clear Telegram draft {draft_id}: {error:#}"),
+        }
     }
 
     async fn flush_guest(&mut self, force: bool, visible_text: &str) -> Result<()> {
