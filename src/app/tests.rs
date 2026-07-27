@@ -710,7 +710,19 @@ fn builds_model_quick_commands_from_current_and_default() {
         commands,
         vec![
             vec!["/model gpt-5.4".to_string(), "/model gpt-5.5".to_string()],
-            vec!["/model default".to_string()],
+            vec![
+                "/model gpt-5.6-sol".to_string(),
+                "/model gpt-5.6-terra".to_string(),
+            ],
+            vec![
+                "/model gpt-5.6-luna".to_string(),
+                "/model gpt-5.4-mini".to_string(),
+            ],
+            vec![
+                "/model gpt-5.3-codex".to_string(),
+                "/model gpt-5.3-codex-spark".to_string(),
+            ],
+            vec!["/model gpt-5.2".to_string(), "/model default".to_string()],
         ]
     );
 }
@@ -721,10 +733,25 @@ fn deduplicates_model_quick_commands_when_current_matches_default() {
 
     assert_eq!(
         commands,
-        vec![vec![
-            "/model gpt-5.5".to_string(),
-            "/model default".to_string(),
-        ]]
+        vec![
+            vec![
+                "/model gpt-5.5".to_string(),
+                "/model gpt-5.6-sol".to_string(),
+            ],
+            vec![
+                "/model gpt-5.6-terra".to_string(),
+                "/model gpt-5.6-luna".to_string(),
+            ],
+            vec![
+                "/model gpt-5.4".to_string(),
+                "/model gpt-5.4-mini".to_string()
+            ],
+            vec![
+                "/model gpt-5.3-codex".to_string(),
+                "/model gpt-5.3-codex-spark".to_string(),
+            ],
+            vec!["/model gpt-5.2".to_string(), "/model default".to_string()],
+        ]
     );
 }
 
@@ -754,9 +781,21 @@ fn includes_catalog_models_in_model_quick_commands() {
         vec![
             vec![
                 "/model gpt-5.5".to_string(),
-                "/model gpt-5.3-codex".to_string(),
+                "/model gpt-5.6-sol".to_string(),
             ],
-            vec!["/model default".to_string()],
+            vec![
+                "/model gpt-5.6-terra".to_string(),
+                "/model gpt-5.6-luna".to_string(),
+            ],
+            vec![
+                "/model gpt-5.4".to_string(),
+                "/model gpt-5.4-mini".to_string()
+            ],
+            vec![
+                "/model gpt-5.3-codex".to_string(),
+                "/model gpt-5.3-codex-spark".to_string(),
+            ],
+            vec!["/model gpt-5.2".to_string(), "/model default".to_string()],
         ]
     );
 }
@@ -782,7 +821,10 @@ fn formats_model_help_text_from_catalog() {
     );
 
     assert!(text.contains("Current model: `gpt-5.5`"));
-    assert_eq!(text, "Current model: `gpt-5.5`");
+    assert_eq!(
+        text,
+        "Current model: `gpt-5.5`\nAvailable quick picks: `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`"
+    );
 }
 
 #[test]

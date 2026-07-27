@@ -591,12 +591,31 @@ where
             ))
             .await?;
         }
+        "mcpServer/elicitation/request" => {
+            process
+                .send_result(id, declined_elicitation_response())
+                .await?;
+            let _ = on_event(CodexEvent::Progress(
+                "Interactive plugin or authorization request was declined; continuing without changing integrations."
+                    .to_string(),
+            ))
+            .await?;
+        }
         _ => {
             bail!("unsupported app-server server request `{method}`");
         }
     }
     Ok(())
 }
+
+fn declined_elicitation_response() -> Value {
+    json!({
+        "action": "decline",
+        "content": Value::Null,
+        "_meta": Value::Null,
+    })
+}
+
 async fn run_review_turn<F, Fut>(
     spec: CommandSpec,
     cancel: CancellationToken,
@@ -1636,6 +1655,18 @@ mod tests {
 
         assert!(!status.authenticated);
         assert_eq!(status.detail, "Not logged in");
+    }
+
+    #[test]
+    fn builds_protocol_complete_declined_elicitation_response() {
+        assert_eq!(
+            declined_elicitation_response(),
+            json!({
+                "action": "decline",
+                "content": null,
+                "_meta": null,
+            })
+        );
     }
 
     #[tokio::test]

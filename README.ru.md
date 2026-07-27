@@ -158,6 +158,8 @@ Telegram chat/topic
 | `/role <tg_user_id> <admin\|user>` | Admin: назначить роль |
 | `/restart_bot` | Admin: перезапустить процесс бота |
 
+`/model` принимает любой Codex model id. Если live-каталог Codex недоступен, Telecodex всё равно показывает быстрый выбор последних известных ChatGPT/Codex моделей.
+
 ### Команды, которые пробрасываются в Codex как есть
 
 `/help`, `/doctor`, `/prompts`, `/memory`, `/mentions`, `/init`, `/bug`, `/config`, `/compact`, `/agents`, `/diff`

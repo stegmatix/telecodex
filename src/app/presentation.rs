@@ -260,8 +260,23 @@ pub(super) fn format_model_help_text(
     current_label: &str,
     available_models: &[AvailableModel],
 ) -> String {
-    let _ = available_models;
-    format!("Current model: `{current_label}`")
+    let mut lines = vec![format!("Current model: `{current_label}`")];
+    let models = prioritized_model_ids(available_models, Some(current_label), None)
+        .into_iter()
+        .filter(|model| model != "Codex default")
+        .take(8)
+        .collect::<Vec<_>>();
+    if !models.is_empty() {
+        lines.push(format!(
+            "Available quick picks: {}",
+            models
+                .iter()
+                .map(|model| format!("`{model}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 fn prioritized_model_ids(
@@ -292,11 +307,28 @@ fn prioritized_model_ids(
     {
         push_model(&model.id);
     }
+    for model in fallback_chatgpt_model_ids() {
+        push_model(model);
+    }
     for model in available_models {
         push_model(&model.id);
     }
 
     ordered
+}
+
+fn fallback_chatgpt_model_ids() -> &'static [&'static str] {
+    &[
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex",
+        "gpt-5.3-codex-spark",
+        "gpt-5.2",
+    ]
 }
 
 pub(super) fn format_sessions_overview(

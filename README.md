@@ -158,6 +158,8 @@ High-level flow:
 | `/role <tg_user_id> <admin\|user>` | Admin: assign role |
 | `/restart_bot` | Admin: restart the bot process |
 
+`/model` accepts any Codex model id. When the live Codex catalog is unavailable, Telecodex still offers quick picks for the latest known ChatGPT/Codex models.
+
 ### Forwarded to Codex as-is
 
 `/help`, `/doctor`, `/prompts`, `/memory`, `/mentions`, `/init`, `/bug`, `/config`, `/compact`, `/agents`, `/diff`
