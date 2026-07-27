@@ -165,6 +165,26 @@ impl TelegramClient {
         .await
     }
 
+    pub async fn send_voice(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i64>,
+        path: &std::path::Path,
+        file_name: &str,
+        mime_type: Option<&str>,
+    ) -> Result<Message> {
+        self.post_multipart_message(
+            "sendVoice",
+            chat_id,
+            message_thread_id,
+            "voice",
+            path,
+            file_name,
+            mime_type,
+        )
+        .await
+    }
+
     pub async fn send_video(
         &self,
         chat_id: i64,
@@ -717,6 +737,7 @@ pub enum ChatAction {
     UploadDocument,
     UploadVideo,
     UploadAudio,
+    UploadVoice,
 }
 
 impl ChatAction {
@@ -727,6 +748,7 @@ impl ChatAction {
             Self::UploadDocument => "upload_document",
             Self::UploadVideo => "upload_video",
             Self::UploadAudio => "upload_audio",
+            Self::UploadVoice => "upload_voice",
         }
     }
 }
@@ -856,6 +878,8 @@ pub fn preferred_image_file_id(message: &Message) -> Option<&str> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn detects_foreign_bot_command_mentions() {
@@ -880,6 +904,62 @@ mod tests {
         assert_eq!(value["draft_id"], 123);
         assert_eq!(value["text"], "partial");
         assert_eq!(value["parse_mode"], "HTML");
+    }
+
+    #[test]
+    fn voice_upload_uses_telegram_voice_action() {
+        assert_eq!(ChatAction::UploadVoice.as_str(), "upload_voice");
+    }
+
+    #[tokio::test]
+    async fn send_voice_uses_telegram_voice_endpoint_and_field() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let bytes_read = stream.read(&mut buffer).await.unwrap();
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..bytes_read]);
+                if request
+                    .windows(b"voice-data".len())
+                    .any(|part| part == b"voice-data")
+                {
+                    break;
+                }
+            }
+
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("POST /botTOKEN/sendVoice "));
+            assert!(request.contains("name=\"voice\""));
+            assert!(request.contains("filename=\"reply.ogg\""));
+            assert!(request.contains("voice-data"));
+
+            let body = r#"{"ok":true,"result":{"message_id":1,"chat":{"id":42,"type":"private"}}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let voice_path = directory.path().join("reply.ogg");
+        std::fs::write(&voice_path, b"voice-data").unwrap();
+        let client = TelegramClient::new("TOKEN".to_string(), format!("http://{address}"));
+
+        let message = client
+            .send_voice(42, None, &voice_path, "reply.ogg", Some("audio/ogg"))
+            .await
+            .unwrap();
+
+        assert_eq!(message.message_id, 1);
+        server.await.unwrap();
     }
 
     #[test]

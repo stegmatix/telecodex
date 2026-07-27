@@ -1080,28 +1080,11 @@ async fn send_generated_artifacts(
         return Ok(());
     }
 
-    let mut entries = fs::read_dir(out_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let metadata = entry.metadata().ok()?;
-            if metadata.is_file() { Some(path) } else { None }
-        })
-        .collect::<Vec<_>>();
-    entries.sort();
+    let entries = generated_artifact_paths(out_dir)?;
 
     for path in entries.into_iter().take(10) {
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let action = match extension.as_str() {
-            "png" | "jpg" | "jpeg" | "webp" => ChatAction::UploadPhoto,
-            "mp3" | "wav" | "m4a" | "ogg" => ChatAction::UploadAudio,
-            "mp4" | "mov" | "webm" => ChatAction::UploadVideo,
-            _ => ChatAction::UploadDocument,
-        };
+        let delivery = generated_artifact_delivery(&path);
+        let action = delivery.chat_action();
         let _ = shared
             .telegram
             .send_chat_action(
@@ -1116,8 +1099,8 @@ async fn send_generated_artifacts(
             .unwrap_or("artifact.bin")
             .to_string();
         let mime_type = mime_type_for_path(&path);
-        match action {
-            ChatAction::UploadPhoto => {
+        match delivery {
+            GeneratedArtifactDelivery::Photo => {
                 shared
                     .telegram
                     .send_photo(
@@ -1129,7 +1112,7 @@ async fn send_generated_artifacts(
                     )
                     .await?;
             }
-            ChatAction::UploadAudio => {
+            GeneratedArtifactDelivery::Audio => {
                 shared
                     .telegram
                     .send_audio(
@@ -1141,7 +1124,19 @@ async fn send_generated_artifacts(
                     )
                     .await?;
             }
-            ChatAction::UploadVideo => {
+            GeneratedArtifactDelivery::Voice => {
+                shared
+                    .telegram
+                    .send_voice(
+                        session.key.chat_id,
+                        Some(session.key.thread_id).filter(|value| *value != 0),
+                        &path,
+                        &file_name,
+                        mime_type.as_deref(),
+                    )
+                    .await?;
+            }
+            GeneratedArtifactDelivery::Video => {
                 shared
                     .telegram
                     .send_video(
@@ -1153,7 +1148,7 @@ async fn send_generated_artifacts(
                     )
                     .await?;
             }
-            _ => {
+            GeneratedArtifactDelivery::Document => {
                 shared
                     .telegram
                     .send_document(
@@ -1169,6 +1164,56 @@ async fn send_generated_artifacts(
     }
 
     Ok(())
+}
+
+fn generated_artifact_paths(out_dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = fs::read_dir(out_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = fs::metadata(&path).ok()?;
+            if metadata.is_file() { Some(path) } else { None }
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedArtifactDelivery {
+    Photo,
+    Audio,
+    Voice,
+    Video,
+    Document,
+}
+
+impl GeneratedArtifactDelivery {
+    fn chat_action(self) -> ChatAction {
+        match self {
+            Self::Photo => ChatAction::UploadPhoto,
+            Self::Audio => ChatAction::UploadAudio,
+            Self::Voice => ChatAction::UploadVoice,
+            Self::Video => ChatAction::UploadVideo,
+            Self::Document => ChatAction::UploadDocument,
+        }
+    }
+}
+
+fn generated_artifact_delivery(path: &Path) -> GeneratedArtifactDelivery {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" | "jpg" | "jpeg" | "webp" => GeneratedArtifactDelivery::Photo,
+        "mp3" | "wav" | "m4a" => GeneratedArtifactDelivery::Audio,
+        "ogg" => GeneratedArtifactDelivery::Voice,
+        "mp4" | "mov" | "webm" => GeneratedArtifactDelivery::Video,
+        _ => GeneratedArtifactDelivery::Document,
+    }
 }
 
 fn attachment_kind_label(kind: AttachmentKind) -> &'static str {
@@ -1246,5 +1291,39 @@ fn mime_type_for_path(path: &Path) -> Option<String> {
         "md" => Some("text/markdown".to_string()),
         "json" => Some("application/json".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod generated_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn sends_ogg_as_voice_and_other_audio_as_audio() {
+        assert_eq!(
+            generated_artifact_delivery(Path::new("reply.ogg")),
+            GeneratedArtifactDelivery::Voice
+        );
+        assert_eq!(
+            generated_artifact_delivery(Path::new("recording.mp3")),
+            GeneratedArtifactDelivery::Audio
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follows_generated_artifact_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.ogg");
+        let link = directory.path().join("reply.ogg");
+        fs::write(&source, b"voice").unwrap();
+        symlink(&source, &link).unwrap();
+
+        assert_eq!(
+            generated_artifact_paths(directory.path()).unwrap(),
+            vec![link, source]
+        );
     }
 }
