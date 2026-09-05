@@ -29,21 +29,31 @@ pub enum BridgeCommand {
     History,
     Status,
     Stop,
+    RetryTurn { turn_id: i64 },
     Allow { user_id: i64 },
     Deny { user_id: i64 },
     Role { user_id: i64, role: String },
     Model { model: Option<String> },
     Think { level: Option<String> },
+    Fast { mode: FastMode },
     Prompt { prompt: Option<String> },
     Approval { approval: String },
     Sandbox { sandbox: String },
     Search { mode: SearchMode },
     AddDir { path: String },
     Limits,
+    LaneCheck,
     Copy,
     Clear,
     RestartBot,
     Unsupported { command: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FastMode {
+    Status,
+    On,
+    Off,
 }
 
 const FORWARDED_COMMANDS: &[&str] = &[
@@ -102,6 +112,9 @@ pub fn parse_command(command: &str, args: &str, original_text: &str) -> Result<P
         "/history" => BridgeCommand::History,
         "/status" => BridgeCommand::Status,
         "/stop" => BridgeCommand::Stop,
+        "/retry" | "/retry_turn" | "/retry-turn" => BridgeCommand::RetryTurn {
+            turn_id: parse_i64_arg(args, "/retry <turn_id>")?,
+        },
         "/allow" => BridgeCommand::Allow {
             user_id: parse_i64_arg(args, "/allow <tg_user_id>")?,
         },
@@ -126,6 +139,9 @@ pub fn parse_command(command: &str, args: &str, original_text: &str) -> Result<P
         "/think" => BridgeCommand::Think {
             level: non_empty(args).map(ToOwned::to_owned),
         },
+        "/fast" => BridgeCommand::Fast {
+            mode: parse_fast_mode(args)?,
+        },
         "/prompt" => BridgeCommand::Prompt {
             prompt: non_empty(args).map(ToOwned::to_owned),
         },
@@ -146,6 +162,7 @@ pub fn parse_command(command: &str, args: &str, original_text: &str) -> Result<P
             path: required_arg(args, "/add-dir <absolute_path>")?.to_string(),
         },
         "/limits" => BridgeCommand::Limits,
+        "/lane_check" | "/lane-check" => BridgeCommand::LaneCheck,
         "/copy" => BridgeCommand::Copy,
         "/clear" => BridgeCommand::Clear,
         "/restart_bot" => BridgeCommand::RestartBot,
@@ -184,8 +201,13 @@ pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
                 "/think medium",
                 "/think high",
                 "/think xhigh",
+                "/think max",
                 "/think default",
             ],
+        )),
+        "/fast" => Some(choice_help(
+            "Fast mode",
+            &["/fast on", "/fast off", "/fast status"],
         )),
         "/role" => {
             let mut parts = args.split_whitespace();
@@ -222,6 +244,9 @@ pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
         "/history" => Some(text_help(
             "Usage: /history\n\nShows an interactive pager for messages from the selected Codex session.",
         )),
+        "/retry" | "/retry_turn" | "/retry-turn" => Some(text_help(
+            "Usage: /retry <turn_id>\n\nRetries a failed or cancelled turn without attachments.",
+        )),
         "/add-dir" | "/add_dir" => Some(text_help(
             "Usage: /add-dir <absolute_path>\n\nExample:\n/add-dir /absolute/path/to/workspace",
         )),
@@ -244,12 +269,14 @@ pub fn default_bot_commands() -> Vec<BotCommand> {
         bot_command("pwd", "Show current working directory"),
         bot_command("model", "Set or show current model"),
         bot_command("think", "Set or show reasoning effort"),
+        bot_command("fast", "Set or show fast mode"),
         bot_command("prompt", "Set or show session prompt"),
         bot_command("approval", "Set approval policy"),
         bot_command("sandbox", "Set sandbox mode"),
         bot_command("search", "Set web search mode"),
         bot_command("add_dir", "Add writable directory"),
         bot_command("limits", "Show latest Codex rate limits snapshot"),
+        bot_command("lane_check", "Show lane check for this topic"),
         bot_command("review", "Run codex review"),
         bot_command("environments", "Show importable Codex environments"),
         bot_command("sessions", "List sessions in this chat"),
@@ -257,6 +284,7 @@ pub fn default_bot_commands() -> Vec<BotCommand> {
         bot_command("copy", "Resend the last assistant reply"),
         bot_command("clear", "Start a fresh Codex session on the next turn"),
         bot_command("stop", "Stop the active turn"),
+        bot_command("retry", "Retry a failed or cancelled turn"),
         bot_command("restart_bot", "Admin: restart the bot process"),
         bot_command("allow", "Admin: allow a Telegram user"),
         bot_command("deny", "Admin: deny a Telegram user"),
@@ -313,6 +341,15 @@ fn parse_search_mode(value: &str) -> Result<SearchMode> {
         "cached" => Ok(SearchMode::Cached),
         "off" | "disabled" => Ok(SearchMode::Disabled),
         _ => bail!("/search <on|off|cached>"),
+    }
+}
+
+fn parse_fast_mode(value: &str) -> Result<FastMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "status" => Ok(FastMode::Status),
+        "on" | "true" | "1" | "fast" => Ok(FastMode::On),
+        "off" | "false" | "0" | "default" | "clear" | "-" => Ok(FastMode::Off),
+        _ => bail!("/fast [on|off|status]"),
     }
 }
 
@@ -410,11 +447,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_fast_command() {
+        let parsed = parse_command("/fast", "on", "/fast on").unwrap();
+        match parsed {
+            ParsedInput::Bridge(BridgeCommand::Fast { mode }) => {
+                assert_eq!(mode, FastMode::On);
+            }
+            _ => panic!("unexpected fast variant"),
+        }
+
+        let parsed = parse_command("/fast", "", "/fast").unwrap();
+        match parsed {
+            ParsedInput::Bridge(BridgeCommand::Fast { mode }) => {
+                assert_eq!(mode, FastMode::Status);
+            }
+            _ => panic!("unexpected fast status variant"),
+        }
+    }
+
+    #[test]
     fn parses_restart_bot_command() {
         let parsed = parse_command("/restart_bot", "", "/restart_bot").unwrap();
         match parsed {
             ParsedInput::Bridge(BridgeCommand::RestartBot) => {}
             _ => panic!("unexpected restart variant"),
+        }
+    }
+
+    #[test]
+    fn parses_retry_command() {
+        let parsed = parse_command("/retry", "42", "/retry 42").unwrap();
+        match parsed {
+            ParsedInput::Bridge(BridgeCommand::RetryTurn { turn_id }) => {
+                assert_eq!(turn_id, 42);
+            }
+            _ => panic!("unexpected retry variant"),
         }
     }
 
@@ -430,6 +497,17 @@ mod tests {
         match logout {
             ParsedInput::Bridge(BridgeCommand::Logout) => {}
             _ => panic!("unexpected logout variant"),
+        }
+    }
+
+    #[test]
+    fn parses_lane_check_aliases_as_bridge_commands() {
+        for command in ["/lane_check", "/lane-check"] {
+            let parsed = parse_command(command, "", command).unwrap();
+            match parsed {
+                ParsedInput::Bridge(BridgeCommand::LaneCheck) => {}
+                _ => panic!("unexpected lane check variant for {command}"),
+            }
         }
     }
 
@@ -471,12 +549,14 @@ mod tests {
             ("/pwd", ParsedInputKind::Bridge),
             ("/model gpt-5.5", ParsedInputKind::Bridge),
             ("/think xhigh", ParsedInputKind::Bridge),
+            ("/fast on", ParsedInputKind::Bridge),
             ("/prompt be concise", ParsedInputKind::Bridge),
             ("/approval never", ParsedInputKind::Bridge),
             ("/sandbox workspace-write", ParsedInputKind::Bridge),
             ("/search on", ParsedInputKind::Bridge),
             ("/add_dir /workspace/shared", ParsedInputKind::Bridge),
             ("/limits", ParsedInputKind::Bridge),
+            ("/lane_check", ParsedInputKind::Bridge),
             ("/review --uncommitted", ParsedInputKind::Bridge),
             ("/environments", ParsedInputKind::Bridge),
             ("/sessions", ParsedInputKind::Bridge),
@@ -484,6 +564,7 @@ mod tests {
             ("/copy", ParsedInputKind::Bridge),
             ("/clear", ParsedInputKind::Bridge),
             ("/stop", ParsedInputKind::Bridge),
+            ("/retry 42", ParsedInputKind::Bridge),
             ("/restart_bot", ParsedInputKind::Bridge),
             ("/allow 123456789", ParsedInputKind::Bridge),
             ("/deny 123456789", ParsedInputKind::Bridge),

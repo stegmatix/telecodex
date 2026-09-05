@@ -398,8 +398,18 @@ where
             let Some(message)=next_message? else {break;};
             match message{
               RpcMessage::Response{id,result,error}=>{
-                if id==turn_request_id{if let Some(error)=error{turn_error=Some(format_rpc_error(&error)); break;} if let Some(turn_id)=result.as_ref().and_then(|v|v.get("turn")).and_then(|t|t.get("id")).and_then(Value::as_str){active_turn_id=Some(turn_id.to_string());}}
-                else if error.is_some() && interrupt_sent {turn_error=Some(format!("turn/interrupt failed: {}",format_rpc_error(error.as_ref().expect("interrupt error missing")))); break;}
+                if id==turn_request_id{
+                    if let Some(error)=error{
+                        turn_error=Some(format_rpc_error(&error));
+                        break;
+                    }
+                    if let Some(turn_id)=result.as_ref().and_then(|v|v.get("turn")).and_then(|t|t.get("id")).and_then(Value::as_str){
+                        active_turn_id=Some(turn_id.to_string());
+                    }
+                } else if error.is_some() && interrupt_sent {
+                    turn_error=Some(format!("turn/interrupt failed: {}",format_rpc_error(error.as_ref().expect("interrupt error missing"))));
+                    break;
+                }
               }
               RpcMessage::Notification{method,params}=>{handle_notification(&method,&params,&mut summary,&mut active_turn_id,&mut turn_error,&mut turn_completed,&mut assistant_message_completed,on_event).await?;}
                 RpcMessage::ServerRequest{id,method,params}=>{handle_server_request(&mut process,id,&method,&params,on_event).await?;}
@@ -417,6 +427,7 @@ where
     Ok(summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_notification<F, Fut>(
     method: &str,
     params: &Value,
@@ -702,6 +713,7 @@ fn build_review_command(
         &session.approval_policy,
         &session.model,
         session.reasoning_effort.as_deref(),
+        session.service_tier.as_deref(),
         developer_instructions.as_deref(),
     );
     if review.uncommitted {
@@ -763,30 +775,22 @@ fn build_turn_start_params(
     for image in request.image_paths() {
         input.push(json!({"type":"localImage","path":sanitize_arg_path(&image)}));
     }
-    json!({"threadId":thread_id,"input":input,"cwd":sanitize_arg_path(&session.cwd),"approvalPolicy":session.approval_policy,"sandboxPolicy":build_sandbox_policy(session),"model":session.model,"effort":session.reasoning_effort,"summary":Value::Null,"serviceTier":Value::Null,"outputSchema":Value::Null,"personality":Value::Null,"collaborationMode":Value::Null,"config":build_config_overrides(effective_search_mode)})
+    let service_tier = session
+        .service_tier
+        .as_deref()
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    json!({"threadId":thread_id,"input":input,"cwd":sanitize_arg_path(&session.cwd),"approvalPolicy":session.approval_policy,"sandboxPolicy":build_sandbox_policy(session),"model":session.model,"effort":session.reasoning_effort,"summary":Value::Null,"serviceTier":service_tier,"outputSchema":Value::Null,"personality":Value::Null,"collaborationMode":Value::Null,"config":build_config_overrides(effective_search_mode)})
 }
 
 fn build_sandbox_policy(session: &SessionRecord) -> Value {
     match session.sandbox_mode.as_str() {
         "danger-full-access" => json!({"type":"dangerFullAccess"}),
         "workspace-write" => {
-            let mut policy = json!({"type":"workspaceWrite","writableRoots":collect_session_roots(session),"networkAccess":true,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false});
-            if !cfg!(windows) {
-                policy["readOnlyAccess"] = build_read_only_access(session);
-            }
-            policy
+            json!({"type":"workspaceWrite","writableRoots":collect_session_roots(session),"networkAccess":true,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false})
         }
-        _ => {
-            let mut policy = json!({"type":"readOnly","networkAccess":true});
-            if !cfg!(windows) {
-                policy["access"] = build_read_only_access(session);
-            }
-            policy
-        }
+        _ => json!({"type":"readOnly","networkAccess":true}),
     }
-}
-fn build_read_only_access(session: &SessionRecord) -> Value {
-    json!({"type":"restricted","includePlatformDefaults":true,"readableRoots":collect_session_roots(session)})
 }
 fn collect_session_roots(session: &SessionRecord) -> Vec<String> {
     let mut roots = BTreeSet::new();
@@ -1025,7 +1029,7 @@ fn build_file_change_approval_request(params: &Value) -> CodexApprovalRequest {
     }
 }
 
-fn approval_request_payload<'a>(params: &'a Value) -> &'a Value {
+fn approval_request_payload(params: &Value) -> &Value {
     params
         .get("request")
         .or_else(|| params.get("approvalRequest"))
@@ -1117,6 +1121,7 @@ fn push_common_config_args(
     approval_policy: &str,
     model: &Option<String>,
     reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
     developer_instructions: Option<&str>,
 ) {
     args.push("-c".to_string());
@@ -1126,6 +1131,13 @@ fn push_common_config_args(
     if let Some(reasoning_effort) = reasoning_effort {
         args.push("-c".to_string());
         args.push(format!("model_reasoning_effort={reasoning_effort}"));
+    }
+    if let Some(service_tier) = service_tier {
+        args.push("-c".to_string());
+        args.push(format!(
+            "service_tier={}",
+            toml::Value::String(service_tier.to_string())
+        ));
     }
     if let Some(developer_instructions) = developer_instructions {
         args.push("-c".to_string());
@@ -1470,6 +1482,7 @@ mod tests {
             cwd: sample_workspace(),
             model: Some("gpt-5.4".to_string()),
             reasoning_effort: None,
+            service_tier: None,
             session_prompt: None,
             sandbox_mode: mode.to_string(),
             approval_policy: "never".to_string(),
@@ -1528,37 +1541,17 @@ mod tests {
     }
 
     #[test]
-    fn windows_read_only_omits_restricted_access() {
+    fn read_only_omits_legacy_restricted_access() {
         let session = session_with_sandbox("read-only");
         let policy = build_sandbox_policy(&session);
-        if cfg!(windows) {
-            assert!(policy.get("access").is_none());
-        } else {
-            assert_eq!(
-                policy
-                    .get("access")
-                    .and_then(|value| value.get("type"))
-                    .and_then(Value::as_str),
-                Some("restricted")
-            );
-        }
+        assert!(policy.get("access").is_none());
     }
 
     #[test]
-    fn windows_workspace_write_omits_restricted_read_only_access() {
+    fn workspace_write_omits_legacy_restricted_read_only_access() {
         let session = session_with_sandbox("workspace-write");
         let policy = build_sandbox_policy(&session);
-        if cfg!(windows) {
-            assert!(policy.get("readOnlyAccess").is_none());
-        } else {
-            assert_eq!(
-                policy
-                    .get("readOnlyAccess")
-                    .and_then(|value| value.get("type"))
-                    .and_then(Value::as_str),
-                Some("restricted")
-            );
-        }
+        assert!(policy.get("readOnlyAccess").is_none());
     }
 
     #[test]
@@ -1597,6 +1590,34 @@ mod tests {
 
         assert_eq!(spec.current_dir.as_deref(), Some(session.cwd.as_path()));
         assert!(spec.args.contains(&"review".to_string()));
+    }
+
+    #[test]
+    fn build_review_command_uses_fast_service_tier() {
+        let mut session = session_with_sandbox("workspace-write");
+        session.service_tier = Some("fast".to_string());
+        let request = review_request();
+        let spec = build_review_command(
+            Path::new("codex"),
+            &session,
+            &request,
+            request.review_mode.as_ref().unwrap(),
+        );
+
+        assert!(spec.args.contains(&"service_tier=\"fast\"".to_string()));
+    }
+
+    #[test]
+    fn build_turn_start_params_uses_fast_service_tier() {
+        let mut session = session_with_sandbox("workspace-write");
+        session.service_tier = Some("fast".to_string());
+        let request = review_request();
+        let params = build_turn_start_params("thread-1", &session, &request);
+
+        assert_eq!(
+            params.get("serviceTier").and_then(Value::as_str),
+            Some("fast")
+        );
     }
 
     #[test]

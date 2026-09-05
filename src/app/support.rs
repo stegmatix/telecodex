@@ -1,5 +1,8 @@
 use super::*;
-use std::{path::Path, process::Stdio};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 
 pub(super) fn app_version_label() -> String {
     format!(
@@ -26,6 +29,25 @@ pub(super) fn prefer_primary_environment_session(
     normalize_path(session.cwd.clone()) == normalize_path(environment_key.to_path_buf())
 }
 
+pub(super) fn retain_active_codex_sessions(
+    sessions: Vec<crate::models::SessionRecord>,
+) -> Result<Vec<crate::models::SessionRecord>> {
+    let codex_home = default_codex_home();
+    sessions
+        .into_iter()
+        .filter_map(|session| {
+            let Some(thread_id) = session.codex_thread_id.as_deref() else {
+                return Some(Ok(session));
+            };
+            match crate::codex_history::is_thread_active(&codex_home, thread_id) {
+                Ok(true) => Some(Ok(session)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        })
+        .collect()
+}
+
 pub(super) fn command_uses_session_context(parsed: &ParsedInput) -> bool {
     match parsed {
         ParsedInput::Forward(_) => true,
@@ -37,6 +59,7 @@ pub(super) fn command_uses_session_context(parsed: &ParsedInput) -> bool {
                 | BridgeCommand::Pwd
                 | BridgeCommand::Model { .. }
                 | BridgeCommand::Think { .. }
+                | BridgeCommand::Fast { .. }
                 | BridgeCommand::Prompt { .. }
                 | BridgeCommand::Approval { .. }
                 | BridgeCommand::Sandbox { .. }
@@ -45,6 +68,7 @@ pub(super) fn command_uses_session_context(parsed: &ParsedInput) -> bool {
                 | BridgeCommand::Limits
                 | BridgeCommand::Copy
                 | BridgeCommand::Clear
+                | BridgeCommand::RetryTurn { .. }
                 | BridgeCommand::Unsupported { .. }
         ),
     }
@@ -53,7 +77,9 @@ pub(super) fn command_uses_session_context(parsed: &ParsedInput) -> bool {
 pub(super) fn parsed_input_requires_codex_auth(parsed: &ParsedInput) -> bool {
     matches!(
         parsed,
-        ParsedInput::Forward(_) | ParsedInput::Bridge(BridgeCommand::Review(_))
+        ParsedInput::Forward(_)
+            | ParsedInput::Bridge(BridgeCommand::Review(_))
+            | ParsedInput::Bridge(BridgeCommand::RetryTurn { .. })
     )
 }
 
@@ -124,7 +150,10 @@ pub(super) fn active_session_identity(
 
 #[cfg(windows)]
 pub(super) fn spawn_restarted_process() -> Result<()> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    if is_systemd_managed_process() {
+        return Ok(());
+    }
+    let exe = restart_executable()?;
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
     let mut command = std::process::Command::new(exe);
@@ -147,7 +176,10 @@ pub(super) fn spawn_restarted_process() -> Result<()> {
 
 #[cfg(not(windows))]
 pub(super) fn spawn_restarted_process() -> Result<()> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    if is_systemd_managed_process() {
+        return Ok(());
+    }
+    let exe = restart_executable()?;
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
     let mut command = std::process::Command::new(exe);
@@ -160,6 +192,27 @@ pub(super) fn spawn_restarted_process() -> Result<()> {
         .stderr(Stdio::null());
     command.spawn().context("failed to spawn restarted bot")?;
     Ok(())
+}
+
+fn is_systemd_managed_process() -> bool {
+    std::env::var_os("SYSTEMD_EXEC_PID").is_some()
+}
+
+fn restart_executable() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    if exe.exists() {
+        return Ok(exe);
+    }
+
+    let exe_text = exe.as_os_str().to_string_lossy();
+    if let Some(stripped) = exe_text.strip_suffix(" (deleted)") {
+        let replacement = PathBuf::from(stripped);
+        if replacement.exists() {
+            return Ok(replacement);
+        }
+    }
+
+    Ok(exe)
 }
 
 pub(super) fn ensure_admin(user: &crate::models::UserRecord) -> Result<()> {
@@ -186,8 +239,8 @@ pub(super) fn ensure_sandbox_mode(value: &str) -> Result<()> {
 pub(super) fn normalize_reasoning_effort(value: &str) -> Result<String> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "minimal" | "low" | "medium" | "high" | "xhigh" => Ok(normalized),
-        _ => bail!("/think <minimal|low|medium|high|xhigh|default>"),
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => Ok(normalized),
+        _ => bail!("/think <minimal|low|medium|high|xhigh|max|default>"),
     }
 }
 

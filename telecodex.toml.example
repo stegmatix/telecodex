@@ -23,7 +23,7 @@ stale_topic_action = "close"
 [codex]
 binary = "codex"
 default_cwd = "/absolute/path/to/telecodex"
-default_model = "gpt-5.5"
+default_model = "gpt-6-astra"
 default_reasoning_effort = "xhigh"
 default_sandbox = "workspace-write"
 default_approval = "never"

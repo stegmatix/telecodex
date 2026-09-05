@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::SearchMode;
 use std::path::PathBuf;
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tempfile::NamedTempFile;
 
 fn sample_workspace() -> PathBuf {
@@ -49,11 +50,102 @@ fn sample_turn_request(session_key: SessionKey) -> TurnRequest {
     }
 }
 
+fn codex_home_test_lock() -> &'static StdMutex<()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+}
+
+struct CodexHomeGuard(Option<std::ffi::OsString>);
+
+impl CodexHomeGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::set_var("CODEX_HOME", path);
+        }
+        Self(previous)
+    }
+}
+
+impl Drop for CodexHomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(value) => unsafe {
+                std::env::set_var("CODEX_HOME", value);
+            },
+            None => unsafe {
+                std::env::remove_var("CODEX_HOME");
+            },
+        }
+    }
+}
+
+fn sample_config(db_path: PathBuf, default_cwd: PathBuf) -> Config {
+    Config {
+        telegram: crate::config::TelegramConfig {
+            bot_token: Some("test-token".to_string()),
+            bot_token_env: None,
+            api_base: "https://api.telegram.org".to_string(),
+            use_message_drafts: false,
+            primary_forum_chat_id: None,
+            auto_create_topics: false,
+            forum_sync_topics_per_poll: 2,
+            stale_topic_days: None,
+            stale_topic_action: crate::config::StaleTopicAction::None,
+            completion_notify_usernames: vec![],
+        },
+        codex: crate::config::CodexConfig {
+            binary: PathBuf::from("codex"),
+            default_cwd: default_cwd.clone(),
+            default_model: Some("gpt-5.4".to_string()),
+            default_reasoning_effort: Some("medium".to_string()),
+            default_sandbox: "workspace-write".to_string(),
+            default_approval: "never".to_string(),
+            default_search_mode: SearchMode::Disabled,
+            default_add_dirs: vec![],
+            seed_workspaces: vec![],
+            import_desktop_history: true,
+            import_cli_history: true,
+        },
+        db_path,
+        startup_admin_ids: vec![],
+        poll_timeout_seconds: 30,
+        edit_debounce_ms: 250,
+        max_text_chunk: 3500,
+        tmp_dir: None,
+    }
+}
+
 #[test]
 fn detects_stale_codex_thread_errors() {
     let error = anyhow::anyhow!("no rollout found for thread id 019abc | code -32600");
 
     assert!(should_reset_session_after_error(&error));
+}
+
+#[test]
+fn formats_turn_completion_notification() {
+    assert_eq!(turn_completion_notification_text(&[]), None);
+    assert_eq!(
+        turn_completion_notification_text(&["@sama".to_string()]).as_deref(),
+        Some("Готово, @sama fyi ✅")
+    );
+    assert_eq!(
+        turn_completion_notification_text(&["@sama".to_string(), "@reviewer".to_string()])
+            .as_deref(),
+        Some("Готово, @sama @reviewer fyi ✅")
+    );
+}
+
+#[test]
+fn builds_rate_limit_retry_keyboard() {
+    let keyboard = rate_limit_retry_keyboard(42);
+
+    assert_eq!(keyboard.inline_keyboard[0][0].text, "Retry");
+    assert_eq!(
+        keyboard.inline_keyboard[0][0].callback_data.as_deref(),
+        Some("cmd:/retry 42")
+    );
 }
 
 #[test]
@@ -113,6 +205,7 @@ fn hides_sessions_overview_body_when_keyboard_is_available() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -145,6 +238,7 @@ fn builds_clickable_chat_sessions_keyboard() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -181,6 +275,7 @@ fn builds_topic_links_for_dashboard_root_sessions_keyboard() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -198,6 +293,7 @@ fn builds_topic_links_for_dashboard_root_sessions_keyboard() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -241,6 +337,7 @@ fn session_environment_match_requires_same_title_and_cwd() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -278,6 +375,7 @@ fn forum_sync_preserves_manual_codex_binding() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -310,6 +408,7 @@ fn forum_sync_seeds_unbound_environment_session() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -342,6 +441,7 @@ fn forum_sync_preserves_fresh_thread_request() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -374,6 +474,7 @@ fn format_session_status_marks_unbound_codex_session() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -408,6 +509,7 @@ fn format_session_status_marks_fresh_codex_session() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -585,6 +687,7 @@ fn history_callback_matches_only_current_session_binding() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -615,6 +718,7 @@ fn history_callback_rejects_unbound_fresh_session() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -641,6 +745,7 @@ fn formats_stale_history_page_for_rebound_topic() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -668,6 +773,7 @@ fn builds_import_button_for_seed_environment() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -711,18 +817,22 @@ fn builds_model_quick_commands_from_current_and_default() {
         vec![
             vec!["/model gpt-5.4".to_string(), "/model gpt-5.5".to_string()],
             vec![
-                "/model gpt-5.6-sol".to_string(),
+                "/model gpt-6-astra".to_string(),
+                "/model gpt-5.6-sol".to_string()
+            ],
+            vec![
                 "/model gpt-5.6-terra".to_string(),
+                "/model gpt-5.6-luna".to_string()
             ],
             vec![
-                "/model gpt-5.6-luna".to_string(),
                 "/model gpt-5.4-mini".to_string(),
+                "/model gpt-5.3-codex".to_string()
             ],
             vec![
-                "/model gpt-5.3-codex".to_string(),
                 "/model gpt-5.3-codex-spark".to_string(),
+                "/model gpt-5.2".to_string()
             ],
-            vec!["/model gpt-5.2".to_string(), "/model default".to_string()],
+            vec!["/model default".to_string()],
         ]
     );
 }
@@ -736,21 +846,25 @@ fn deduplicates_model_quick_commands_when_current_matches_default() {
         vec![
             vec![
                 "/model gpt-5.5".to_string(),
+                "/model gpt-6-astra".to_string()
+            ],
+            vec![
                 "/model gpt-5.6-sol".to_string(),
+                "/model gpt-5.6-terra".to_string()
             ],
             vec![
-                "/model gpt-5.6-terra".to_string(),
                 "/model gpt-5.6-luna".to_string(),
+                "/model gpt-5.4".to_string()
             ],
             vec![
-                "/model gpt-5.4".to_string(),
-                "/model gpt-5.4-mini".to_string()
+                "/model gpt-5.4-mini".to_string(),
+                "/model gpt-5.3-codex".to_string()
             ],
             vec![
-                "/model gpt-5.3-codex".to_string(),
                 "/model gpt-5.3-codex-spark".to_string(),
+                "/model gpt-5.2".to_string()
             ],
-            vec!["/model gpt-5.2".to_string(), "/model default".to_string()],
+            vec!["/model default".to_string()],
         ]
     );
 }
@@ -781,21 +895,25 @@ fn includes_catalog_models_in_model_quick_commands() {
         vec![
             vec![
                 "/model gpt-5.5".to_string(),
+                "/model gpt-6-astra".to_string()
+            ],
+            vec![
                 "/model gpt-5.6-sol".to_string(),
+                "/model gpt-5.6-terra".to_string()
             ],
             vec![
-                "/model gpt-5.6-terra".to_string(),
                 "/model gpt-5.6-luna".to_string(),
+                "/model gpt-5.4".to_string()
             ],
             vec![
-                "/model gpt-5.4".to_string(),
-                "/model gpt-5.4-mini".to_string()
+                "/model gpt-5.4-mini".to_string(),
+                "/model gpt-5.3-codex".to_string()
             ],
             vec![
-                "/model gpt-5.3-codex".to_string(),
                 "/model gpt-5.3-codex-spark".to_string(),
+                "/model gpt-5.2".to_string()
             ],
-            vec!["/model gpt-5.2".to_string(), "/model default".to_string()],
+            vec!["/model default".to_string()],
         ]
     );
 }
@@ -823,7 +941,7 @@ fn formats_model_help_text_from_catalog() {
     assert!(text.contains("Current model: `gpt-5.5`"));
     assert_eq!(
         text,
-        "Current model: `gpt-5.5`\nAvailable quick picks: `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`"
+        "Current model: `gpt-5.5`\nAvailable quick picks: `gpt-5.5`, `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`"
     );
 }
 
@@ -839,6 +957,7 @@ fn builds_clickable_codex_sessions_keyboard() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -910,6 +1029,24 @@ fn merges_adjacent_history_entries_with_same_role() {
 }
 
 #[test]
+fn deduplicates_adjacent_identical_history_entries() {
+    let preview = format_codex_history_preview_plain(&[
+        CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "same answer".to_string(),
+            timestamp: "2026-03-13T09:00:01Z".to_string(),
+        },
+        CodexHistoryEntry {
+            role: "assistant".to_string(),
+            text: "same answer".to_string(),
+            timestamp: "2026-03-13T09:00:02Z".to_string(),
+        },
+    ]);
+
+    assert_eq!(preview.matches("same answer").count(), 1);
+}
+
+#[test]
 fn formats_recent_codex_history_preview_as_html_blockquotes() {
     let preview = format_codex_history_preview_html(&[
         CodexHistoryEntry {
@@ -940,6 +1077,19 @@ fn preserves_markdown_inside_history_html_blockquotes() {
     assert!(preview.contains(
             "<blockquote>Then yes, <b>counting</b> is already in progress and there is <code>code</code>.</blockquote>"
         ));
+}
+
+#[test]
+fn normalizes_history_lines_that_already_use_quote_prefixes() {
+    let preview = format_codex_history_preview_html(&[CodexHistoryEntry {
+        role: "assistant".to_string(),
+        text: "│ **Codex**\n│ [repo](/home/s/projects/repo)".to_string(),
+        timestamp: "2026-03-13T09:00:03Z".to_string(),
+    }]);
+
+    assert!(preview.contains(
+        "<blockquote><b>Codex</b>\nrepo (&#x2F;home&#x2F;s&#x2F;projects&#x2F;repo)</blockquote>"
+    ));
 }
 
 #[test]
@@ -978,6 +1128,7 @@ fn keeps_audio_transcript_in_user_prompt_only() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -1038,6 +1189,7 @@ fn keeps_non_transcribed_audio_paths_in_user_prompt() {
         cwd: sample_workspace(),
         model: None,
         reasoning_effort: None,
+        service_tier: None,
         session_prompt: None,
         sandbox_mode: "workspace-write".to_string(),
         approval_policy: "never".to_string(),
@@ -1323,4 +1475,171 @@ async fn upload_failure_marks_turn_failed_and_cleanup_still_runs() {
             .iter()
             .any(|message| message.contains("upload failed"))
     );
+}
+
+#[test]
+fn rebinds_stale_session_to_latest_active_thread_for_same_cwd() {
+    let _lock = codex_home_test_lock().lock().unwrap();
+    let codex_home = tempfile::tempdir().unwrap();
+    let workspace = codex_home.path().join("workspace");
+    std::fs::create_dir_all(codex_home.path().join("sessions")).unwrap();
+    std::fs::create_dir_all(codex_home.path().join("archived_sessions")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        codex_home
+            .path()
+            .join("archived_sessions")
+            .join("rollout-archive.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-03-13T08:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"archived-thread\",\"timestamp\":\"2026-03-13T08:00:00Z\",\"cwd\":\"{}\",\"source\":\"exec\"}}}}\n",
+            workspace.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        codex_home
+            .path()
+            .join("sessions")
+            .join("rollout-active.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-03-13T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"active-thread\",\"timestamp\":\"2026-03-13T09:00:00Z\",\"cwd\":\"{}\",\"source\":\"exec\"}}}}\n",
+            workspace.display()
+        ),
+    )
+    .unwrap();
+
+    let _codex_home_guard = CodexHomeGuard::set(codex_home.path());
+
+    let db = NamedTempFile::new().unwrap();
+    let config = sample_config(db.path().to_path_buf(), workspace.clone());
+    let store = Store::open(db.path(), &[100], &sample_defaults()).unwrap();
+    let shared = Arc::new(AppShared {
+        config,
+        store,
+        telegram: TelegramClient::new(
+            "test-token".to_string(),
+            "https://api.telegram.org".to_string(),
+        ),
+        codex: CodexRunner::new(PathBuf::from("codex")),
+        bot_username: None,
+        service_user_id: 0,
+        transcription_backend: None,
+        session_defaults: sample_defaults(),
+        limits_cache: Mutex::new(None),
+        history_page_cache: Mutex::new(HistoryPageCache::default()),
+        pending_approvals: Mutex::new(HashMap::new()),
+        pending_codex_login: Mutex::new(None),
+        codex_login_backoff_until: Mutex::new(None),
+        shutdown: CancellationToken::new(),
+    });
+    let session = shared
+        .store
+        .ensure_session(SessionKey::new(1, Some(52)), 100, &sample_defaults())
+        .unwrap();
+    shared
+        .store
+        .set_session_cwd(session.key, &workspace)
+        .unwrap();
+    shared
+        .store
+        .set_session_codex_thread(session.key, "archived-thread")
+        .unwrap();
+    let session = shared.store.get_session(session.key).unwrap().unwrap();
+
+    let rebound = resolve_session_codex_binding_from_history(&shared, session).unwrap();
+
+    assert_eq!(rebound.codex_thread_id.as_deref(), Some("active-thread"));
+}
+
+#[test]
+fn keeps_truly_archived_session_unbound_when_no_active_replacement_exists() {
+    let _lock = codex_home_test_lock().lock().unwrap();
+    let codex_home = tempfile::tempdir().unwrap();
+    let workspace = codex_home.path().join("workspace");
+    std::fs::create_dir_all(codex_home.path().join("archived_sessions")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        codex_home
+            .path()
+            .join("archived_sessions")
+            .join("rollout-archive.jsonl"),
+        format!(
+            "{{\"timestamp\":\"2026-03-13T08:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"archived-thread\",\"timestamp\":\"2026-03-13T08:00:00Z\",\"cwd\":\"{}\",\"source\":\"exec\"}}}}\n",
+            workspace.display()
+        ),
+    )
+    .unwrap();
+
+    let _codex_home_guard = CodexHomeGuard::set(codex_home.path());
+
+    let db = NamedTempFile::new().unwrap();
+    let config = sample_config(db.path().to_path_buf(), workspace.clone());
+    let store = Store::open(db.path(), &[100], &sample_defaults()).unwrap();
+    let shared = Arc::new(AppShared {
+        config,
+        store,
+        telegram: TelegramClient::new(
+            "test-token".to_string(),
+            "https://api.telegram.org".to_string(),
+        ),
+        codex: CodexRunner::new(PathBuf::from("codex")),
+        bot_username: None,
+        service_user_id: 0,
+        transcription_backend: None,
+        session_defaults: sample_defaults(),
+        limits_cache: Mutex::new(None),
+        history_page_cache: Mutex::new(HistoryPageCache::default()),
+        pending_approvals: Mutex::new(HashMap::new()),
+        pending_codex_login: Mutex::new(None),
+        codex_login_backoff_until: Mutex::new(None),
+        shutdown: CancellationToken::new(),
+    });
+    let session = shared
+        .store
+        .ensure_session(SessionKey::new(1, Some(52)), 100, &sample_defaults())
+        .unwrap();
+    shared
+        .store
+        .set_session_cwd(session.key, &workspace)
+        .unwrap();
+    shared
+        .store
+        .set_session_codex_thread(session.key, "archived-thread")
+        .unwrap();
+    let session = shared.store.get_session(session.key).unwrap().unwrap();
+
+    let rebound = resolve_session_codex_binding_from_history(&shared, session).unwrap();
+
+    assert_eq!(rebound.codex_thread_id.as_deref(), Some("archived-thread"));
+}
+
+#[test]
+fn offers_gpt6_without_catalog_and_deduplicates_live_model() {
+    let fallback = model_quick_commands(&[], None, None);
+    assert_eq!(fallback[0][0], "/model gpt-6-astra");
+    let models = [AvailableModel {
+        id: "gpt-6-astra".to_string(),
+        display_name: Some("GPT-6 Astra".to_string()),
+        description: None,
+        is_default: true,
+    }];
+    let commands = model_quick_commands(&models, Some("gpt-6-astra"), Some("gpt-6-astra"));
+    assert_eq!(
+        commands
+            .iter()
+            .flatten()
+            .filter(|command| command.as_str() == "/model gpt-6-astra")
+            .count(),
+        1
+    );
+    assert!(
+        format_model_help_text("gpt-6-astra", &models)
+            .contains("Current model: \u{0060}gpt-6-astra\u{0060}")
+    );
+}
+
+#[test]
+fn supports_gpt6_max_reasoning_effort() {
+    assert_eq!(normalize_reasoning_effort(" MAX ").unwrap(), "max");
+    assert!(normalize_reasoning_effort("unsupported").is_err());
 }
