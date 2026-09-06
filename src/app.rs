@@ -1293,7 +1293,8 @@ impl App {
                                 quick_commands: vec![
                                     vec!["/think minimal".to_string(), "/think low".to_string()],
                                     vec!["/think medium".to_string(), "/think high".to_string()],
-                                    vec!["/think xhigh".to_string(), "/think default".to_string()],
+                                    vec!["/think xhigh".to_string(), "/think max".to_string()],
+                                    vec!["/think default".to_string()],
                                 ],
                             },
                         )
