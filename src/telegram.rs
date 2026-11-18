@@ -348,12 +348,17 @@ impl TelegramClient {
             .timeout(TELEGRAM_DOWNLOAD_TIMEOUT)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .context("telegram getFile download failed")?;
         let status = response.status();
         if !status.is_success() {
             bail!("telegram file download failed with status {status}");
         }
-        Ok(response.bytes().await?.to_vec())
+        Ok(response
+            .bytes()
+            .await
+            .map_err(reqwest::Error::without_url)?
+            .to_vec())
     }
 
     async fn post<T, R>(&self, method: &str, payload: Option<&T>) -> Result<R>
@@ -403,11 +408,13 @@ impl TelegramClient {
         let response = request
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("telegram {method} request failed"))?;
         let status = response.status();
         let body = response
             .text()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("telegram {method} response body failed"))?;
 
         if !status.is_success() {
@@ -494,11 +501,13 @@ impl TelegramClient {
             .timeout(TELEGRAM_UPLOAD_TIMEOUT)
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("telegram {method} multipart request failed"))?;
         let status = response.status();
         let body = response
             .text()
             .await
+            .map_err(reqwest::Error::without_url)
             .with_context(|| format!("telegram {method} response body failed"))?;
 
         if !status.is_success() {
@@ -637,6 +646,15 @@ pub fn outbound_interval_for_chat(chat_id: i64) -> Duration {
     } else {
         Duration::from_millis(TELEGRAM_PRIVATE_OUTBOUND_INTERVAL_MS)
     }
+}
+
+pub fn is_transient_error(error: &anyhow::Error) -> bool {
+    if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+        return error.is_timeout() || error.is_connect() || error.is_body() || error.is_request();
+    }
+    error
+        .downcast_ref::<TelegramError>()
+        .is_some_and(|error| error.status.is_server_error())
 }
 
 fn telegram_retry_after(error: &anyhow::Error) -> Option<u64> {
@@ -1124,6 +1142,72 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn transport_errors_preserve_classification_without_exposing_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let token = "SECRET_TEST_TOKEN";
+        let client = TelegramClient::new(token.into(), base);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.ogg");
+        std::fs::write(&path, b"test").unwrap();
+        let errors = [
+            client.get_me().await.unwrap_err(),
+            client.download_file("file.ogg").await.unwrap_err(),
+            client
+                .send_voice(1, None, &path, "test.ogg", None)
+                .await
+                .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(is_transient_error(&error));
+            assert!(!format!("{error:#}").contains(token));
+            assert!(!format!("{error:?}").contains(token));
+            assert!(
+                error
+                    .downcast_ref::<reqwest::Error>()
+                    .unwrap()
+                    .url()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_timeout_is_transient_and_hides_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TelegramClient::new(
+            "SECRET_TEST_TOKEN".into(),
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let error = client
+            .post_with_timeout::<(), User>("getMe", None, Duration::from_millis(30))
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_timeout());
+        assert!(is_transient_error(&error));
+        assert!(!format!("{error:#}").contains("SECRET_TEST_TOKEN"));
+    }
+
+    #[test]
+    fn authorization_and_bad_requests_are_not_transient() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::BAD_REQUEST,
+        ] {
+            assert!(!is_transient_error(
+                &TelegramError {
+                    status,
+                    description: "failure".into(),
+                    retry_after: None
+                }
+                .into()
+            ));
+        }
+    }
 
     #[test]
     fn detects_foreign_bot_command_mentions() {

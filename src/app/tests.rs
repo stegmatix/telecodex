@@ -23,7 +23,7 @@ fn sample_turn_workspace() -> TurnWorkspace {
     TurnWorkspace { root, out_dir }
 }
 
-fn sample_defaults() -> SessionDefaults {
+pub(super) fn sample_defaults() -> SessionDefaults {
     SessionDefaults {
         cwd: sample_workspace(),
         model: Some("gpt-5.5".to_string()),
@@ -80,7 +80,7 @@ impl Drop for CodexHomeGuard {
     }
 }
 
-fn sample_config(db_path: PathBuf, default_cwd: PathBuf) -> Config {
+pub(super) fn sample_config(db_path: PathBuf, default_cwd: PathBuf) -> Config {
     Config {
         telegram: crate::config::TelegramConfig {
             bot_token: Some("test-token".to_string()),

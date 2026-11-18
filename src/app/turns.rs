@@ -660,17 +660,31 @@ impl LiveTurnSink {
     }
 
     async fn flush(&mut self, force: bool) -> Result<()> {
+        match self.flush_pending(force).await {
+            Err(error) if !force && crate::telegram::is_transient_error(&error) => {
+                self.edit_backoff_until = Some(Instant::now() + Duration::from_secs(3));
+                tracing::warn!(
+                    "Telegram preview temporarily unavailable; continuing turn: {error:#}"
+                );
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    async fn flush_pending(&mut self, force: bool) -> Result<()> {
         if self
             .edit_backoff_until
             .is_some_and(|until| until <= Instant::now())
         {
             self.edit_backoff_until = None;
         }
-        if self
-            .edit_backoff_until
-            .is_some_and(|until| until > Instant::now())
-        {
-            return Ok(());
+        if let Some(until) = self.edit_backoff_until {
+            if !force {
+                return Ok(());
+            }
+            sleep(until.saturating_duration_since(Instant::now())).await;
+            self.edit_backoff_until = None;
         }
         let visible_text = self.visible_text(force);
         let min_flush_interval = self.min_flush_interval();
@@ -707,7 +721,21 @@ impl LiveTurnSink {
                 .cloned()
                 .filter(|_| self.draft_id.is_none())
             {
-                self.edit_message(existing, chunk, &html).await?;
+                for attempt in 0..3 {
+                    match self.edit_message(existing.clone(), chunk, &html).await {
+                        Err(error)
+                            if force
+                                && attempt < 2
+                                && crate::telegram::is_transient_error(&error) =>
+                        {
+                            sleep(Duration::from_secs(3)).await;
+                        }
+                        result => {
+                            result?;
+                            break;
+                        }
+                    }
+                }
             } else {
                 let result = self
                     .shared
@@ -897,6 +925,7 @@ impl LiveTurnSink {
             .await;
         match result {
             Ok(_) => Ok(()),
+            Err(error) if crate::telegram::is_transient_error(&error) => Err(error),
             Err(error) => {
                 if is_message_not_modified(&error) {
                     return Ok(());
@@ -1623,8 +1652,141 @@ mod generated_artifact_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{sample_config, sample_defaults};
     use super::*;
     use crate::config::SearchMode;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn preview_sink(api_base: String, directory: &Path) -> LiveTurnSink {
+        let defaults = sample_defaults();
+        let path = directory.join("test.sqlite3");
+        let store = Store::open(&path, &[100], &defaults).unwrap();
+        let session = store
+            .ensure_session(SessionKey::new(1, None), 100, &defaults)
+            .unwrap();
+        let shared = Arc::new(AppShared {
+            config: sample_config(path, directory.to_path_buf()),
+            store,
+            telegram: TelegramClient::new("TEST_TOKEN".into(), api_base),
+            codex: CodexRunner::new(PathBuf::from("codex")),
+            bot_username: None,
+            service_user_id: 0,
+            transcription_backend: None,
+            session_defaults: defaults,
+            limits_cache: Mutex::new(None),
+            history_page_cache: Mutex::new(HistoryPageCache::default()),
+            pending_approvals: Mutex::new(HashMap::new()),
+            pending_codex_login: Mutex::new(None),
+            codex_login_backoff_until: Mutex::new(None),
+            shutdown: CancellationToken::new(),
+        });
+        LiveTurnSink::new_preview(
+            shared,
+            &session,
+            None,
+            TelegramMessageRef {
+                chat_id: 1,
+                message_id: 7,
+            },
+        )
+    }
+
+    async fn edit_server(statuses: Vec<u16>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for status in statuses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    request.extend_from_slice(&buffer[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length: ")
+                                    .and_then(|v| v.parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let body = if status == 200 {
+                    r#"{"ok":true,"result":{"message_id":7,"chat":{"id":1,"type":"private"}}}"#
+                } else {
+                    r#"{"ok":false,"description":"temporary failure"}"#
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn preview_failure_keeps_turn_and_pending_text_then_final_recovers() {
+        let (base, server) = edit_server(vec![503, 200]).await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut sink = preview_sink(base, directory.path());
+        sink.handle_event(CodexEvent::AssistantText("partial".into()))
+            .await
+            .unwrap();
+        assert!(sink.last_flushed_text.is_empty());
+        assert_eq!(sink.pending_text, "partial");
+        assert!(sink.edit_backoff_until.is_some());
+        sink.handle_event(CodexEvent::AssistantText("final answer".into()))
+            .await
+            .unwrap();
+        sink.finish(None).await.unwrap();
+        assert_eq!(sink.last_flushed_text, "final answer");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.starts_with("POST /botTEST_TOKEN/editMessageText "))
+        );
+        assert!(requests[1].contains("final answer"));
+    }
+
+    #[tokio::test]
+    async fn final_edit_retries_transient_failure() {
+        let (base, server) = edit_server(vec![502, 200]).await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut sink = preview_sink(base, directory.path());
+        sink.pending_text = "final answer".into();
+        sink.finish(None).await.unwrap();
+        assert_eq!(sink.last_flushed_text, "final answer");
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn permanent_edit_error_is_not_reported_as_delivered() {
+        let (base, server) = edit_server(vec![400, 400]).await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut sink = preview_sink(base, directory.path());
+        assert!(
+            sink.handle_event(CodexEvent::AssistantText("partial".into()))
+                .await
+                .is_err()
+        );
+        assert!(sink.last_flushed_text.is_empty());
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
 
     fn session_with_service_tier(service_tier: Option<&str>) -> crate::models::SessionRecord {
         crate::models::SessionRecord {

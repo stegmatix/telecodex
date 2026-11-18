@@ -82,8 +82,9 @@ No webhook infrastructure. No browser dependency. No cloud relay between Telegra
 
 ### Audio transcription
 
-- Optional audio transcription via Groq Whisper.
-- If `GROQ_API_KEY` is set, Telecodex transcribes audio and voice attachments before sending the turn to Codex.
+- Optional audio transcription through an external shared helper or standalone Groq Whisper.
+- If `TELECODEX_TRANSCRIBE_COMMAND` is set, it takes precedence over direct Groq. Set an absolute executable path; Telecodex invokes it as `COMMAND --json AUDIO_PATH`, without a shell. It must return a JSON object with `text`, `provider` (`samsung` or `groq`) and `model`. The helper owns provider selection, deadlines and fallback. Helen uses `/home/user/projects/helen/scripts/ops/transcribe_audio.sh` for Samsung Qwen first and Groq fallback.
+- If no command is configured and `GROQ_API_KEY` is set, standalone Telecodex uses direct Groq transcription for audio and voice attachments before sending the turn to Codex.
 - If transcription succeeds, the transcript is appended to the user prompt.
 
 ### Access control and safety
@@ -316,6 +317,7 @@ Telecodex will start `codex login --device-auth`, send a clickable `auth.openai.
 
 - `TELECODEX_TELEGRAM_BOT_TOKEN`: Telegram Bot API token.
 - `GROQ_API_KEY`: enables Groq Whisper transcription for audio and voice messages.
+- `TELECODEX_TRANSCRIBE_COMMAND`: absolute path to the shared ASR helper; takes precedence over the standalone Groq backend. Restart Telecodex after changing it. The actual completing provider is retained in transcript metadata and logs.
 - `GROQ_TRANSCRIPTION_MODEL`: optional override for the Groq model, defaults to `whisper-large-v3-turbo`.
 - `TELECODEX_RESTART_DELAY_MS`: optional startup delay before boot.
 
