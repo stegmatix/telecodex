@@ -1226,7 +1226,7 @@ mod tests {
             .set_agent_model(&session, AgentVendor::Claude, Some("opus"))
             .unwrap();
         store
-            .set_agent_thread(&session, AgentVendor::Gemini, Some("gemini-1"))
+            .set_agent_thread(&session, AgentVendor::Antigravity, Some("agy-1"))
             .unwrap();
         let claude = store
             .agent_session_state(&session, AgentVendor::Claude)
@@ -1262,11 +1262,11 @@ mod tests {
         assert_eq!(store.last_assistant_text(key).unwrap(), None);
         assert_eq!(
             store
-                .agent_session_state(&session, AgentVendor::Gemini)
+                .agent_session_state(&session, AgentVendor::Antigravity)
                 .unwrap()
                 .thread_id
                 .as_deref(),
-            Some("gemini-1")
+            Some("agy-1")
         );
         let reloaded = store.get_session(key).unwrap().unwrap();
         assert_eq!(reloaded.id, session.id);
@@ -1280,13 +1280,13 @@ mod tests {
         let key = SessionKey::new(11, None);
         let session = store.ensure_session(key, 1, &defaults()).unwrap();
         store
-            .set_agent_thread(&session, AgentVendor::Gemini, Some("g"))
+            .set_agent_thread(&session, AgentVendor::Antigravity, Some("g"))
             .unwrap();
         store.delete_session(key).unwrap();
         let session = store.ensure_session(key, 1, &defaults()).unwrap();
         assert_eq!(
             store
-                .agent_session_state(&session, AgentVendor::Gemini)
+                .agent_session_state(&session, AgentVendor::Antigravity)
                 .unwrap(),
             AgentSessionState::default()
         );

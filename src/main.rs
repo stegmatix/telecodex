@@ -1,11 +1,11 @@
 mod agent;
+mod antigravity;
 mod app;
 mod claude;
 mod codex;
 mod codex_history;
 mod commands;
 mod config;
-mod gemini;
 mod limits;
 mod models;
 mod render;

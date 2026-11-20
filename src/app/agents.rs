@@ -5,7 +5,7 @@ impl App {
         self.shared.store.agent_vendor()
     }
 
-    /// `/agent [codex|claude|gemini]`: show or switch the global agent CLI.
+    /// `/agent [codex|claude|antigravity]`: show or switch the global agent CLI.
     pub(super) async fn handle_agent_command(
         &self,
         user: &crate::models::UserRecord,
@@ -77,7 +77,7 @@ impl App {
         Ok(true)
     }
 
-    /// `/model` for Claude and Gemini: per-session model stored per vendor.
+    /// `/model` for Claude and Antigravity: per-session model stored per vendor.
     pub(super) async fn handle_vendor_model_command(
         &self,
         vendor: AgentVendor,
@@ -90,9 +90,9 @@ impl App {
                 self.shared.agents.claude.models(),
                 self.shared.agents.claude.default_model(),
             ),
-            AgentVendor::Gemini => (
-                self.shared.agents.gemini.models(),
-                self.shared.agents.gemini.default_model(),
+            AgentVendor::Antigravity => (
+                self.shared.agents.antigravity.models(),
+                self.shared.agents.antigravity.default_model(),
             ),
             AgentVendor::Codex => bail!("Codex models are handled by the Codex model picker"),
         };
@@ -121,6 +121,16 @@ impl App {
             .as_deref()
             .or(default_model)
             .unwrap_or(&fallback);
+        let models = match vendor {
+            AgentVendor::Antigravity => match self.shared.agents.antigravity.read_models().await {
+                Ok(models) => models,
+                Err(error) => {
+                    tracing::warn!("failed to read Antigravity models: {error:#}");
+                    models.to_vec()
+                }
+            },
+            _ => models.to_vec(),
+        };
         let mut quick_commands = models
             .chunks(2)
             .map(|chunk| {

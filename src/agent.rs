@@ -1,4 +1,4 @@
-//! Backend seam: one turn lifecycle shared by the Codex, Claude and Gemini CLIs.
+//! Backend seam: one turn lifecycle shared by the Codex, Claude and Antigravity CLIs.
 //!
 //! Every backend reports progress through [`CodexEvent`] and returns a
 //! [`RunSummary`], so Telegram rendering and the `turns` table stay identical
@@ -14,12 +14,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    antigravity::AntigravityRunner,
     claude::ClaudeRunner,
     codex::{
         CodexEvent, CodexEventOutcome, CodexRunner, CommandSpec, RunSummary, spawnable_command,
         terminate_child,
     },
-    gemini::GeminiRunner,
     models::{SessionRecord, TurnRequest},
 };
 
@@ -28,17 +28,17 @@ pub enum AgentVendor {
     #[default]
     Codex,
     Claude,
-    Gemini,
+    Antigravity,
 }
 
 impl AgentVendor {
-    pub const ALL: [AgentVendor; 3] = [Self::Codex, Self::Claude, Self::Gemini];
+    pub const ALL: [AgentVendor; 3] = [Self::Codex, Self::Claude, Self::Antigravity];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
-            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -46,7 +46,7 @@ impl AgentVendor {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
-            Self::Gemini => "Gemini",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -54,7 +54,8 @@ impl AgentVendor {
         match value.trim().to_ascii_lowercase().as_str() {
             "codex" | "openai" => Some(Self::Codex),
             "claude" | "anthropic" => Some(Self::Claude),
-            "gemini" | "google" => Some(Self::Gemini),
+            // Gemini CLI was replaced by the Antigravity CLI (`agy`).
+            "antigravity" | "agy" | "gemini" | "google" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -71,7 +72,7 @@ pub struct AgentSessionState {
 pub struct AgentRunners {
     pub codex: CodexRunner,
     pub claude: ClaudeRunner,
-    pub gemini: GeminiRunner,
+    pub antigravity: AntigravityRunner,
 }
 
 impl AgentRunners {
@@ -79,7 +80,7 @@ impl AgentRunners {
         Self {
             codex: CodexRunner::new(config.codex.binary.clone()),
             claude: ClaudeRunner::new(config.claude.clone()),
-            gemini: GeminiRunner::new(config.gemini.clone()),
+            antigravity: AntigravityRunner::new(config.antigravity.clone()),
         }
     }
 
@@ -88,7 +89,7 @@ impl AgentRunners {
         Self {
             codex: CodexRunner::new(PathBuf::from("codex")),
             claude: ClaudeRunner::new(toml::from_str("").expect("claude defaults")),
-            gemini: GeminiRunner::new(toml::from_str("").expect("gemini defaults")),
+            antigravity: AntigravityRunner::new(toml::from_str("").expect("antigravity defaults")),
         }
     }
 
@@ -125,12 +126,12 @@ impl AgentRunners {
                 )
                 .await
             }
-            AgentVendor::Gemini => {
-                let command = self.gemini.build_command(session, state, request);
+            AgentVendor::Antigravity => {
+                let command = self.antigravity.build_command(session, state, request);
                 run_cli_turn(
-                    "gemini",
+                    "antigravity",
                     command,
-                    crate::gemini::GeminiStreamParser::default(),
+                    crate::antigravity::AntigravityStreamParser::default(),
                     cancel,
                     &mut on_event,
                 )
@@ -300,16 +301,21 @@ pub(crate) fn merged_instructions(
     }
 }
 
-/// One-line progress label for a tool call reported by Claude or Gemini.
+/// One-line progress label for a tool call reported by Claude or Antigravity.
 pub(crate) fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
     let detail = [
         "command",
+        "CommandLine",
         "file_path",
         "absolute_path",
+        "AbsolutePath",
+        "TargetFile",
         "path",
         "pattern",
         "url",
+        "Url",
         "query",
+        "Query",
     ]
     .into_iter()
     .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
@@ -324,7 +330,7 @@ pub(crate) fn describe_tool_call(name: &str, input: &serde_json::Value) -> Strin
 }
 
 fn is_shell_tool(name: &str) -> bool {
-    matches!(name, "Bash" | "run_shell_command" | "shell")
+    matches!(name, "Bash" | "run_shell_command" | "run_command" | "shell")
 }
 
 fn truncate_chars(text: &str, limit: usize) -> String {
@@ -342,7 +348,11 @@ mod tests {
     #[test]
     fn parses_vendor_names() {
         assert_eq!(AgentVendor::parse("Claude"), Some(AgentVendor::Claude));
-        assert_eq!(AgentVendor::parse(" gemini "), Some(AgentVendor::Gemini));
+        assert_eq!(
+            AgentVendor::parse(" gemini "),
+            Some(AgentVendor::Antigravity)
+        );
+        assert_eq!(AgentVendor::parse("agy"), Some(AgentVendor::Antigravity));
         assert_eq!(AgentVendor::parse("codex"), Some(AgentVendor::Codex));
         assert_eq!(AgentVendor::parse("gpt"), None);
         for vendor in AgentVendor::ALL {
@@ -361,5 +371,9 @@ mod tests {
             "Read `/tmp/a.txt`"
         );
         assert_eq!(describe_tool_call("TodoWrite", &json!({})), "TodoWrite");
+        assert_eq!(
+            describe_tool_call("run_command", &json!({"CommandLine": "echo hi"})),
+            "Running `echo hi`"
+        );
     }
 }

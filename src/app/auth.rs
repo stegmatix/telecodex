@@ -15,7 +15,7 @@ impl App {
         chat_id: i64,
         thread_id: Option<i64>,
     ) -> Result<bool> {
-        // Claude and Gemini CLIs manage their own credentials on the host.
+        // Claude and Antigravity CLIs manage their own credentials on the host.
         if self.active_agent_vendor()? != AgentVendor::Codex {
             return Ok(true);
         }

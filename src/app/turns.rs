@@ -559,10 +559,9 @@ pub(super) fn should_reset_session_after_error(error: &anyhow::Error) -> bool {
     let display = error.to_string().to_ascii_lowercase();
     let matches = |text: &str| {
         text.contains("no rollout found for thread id")
-            // Claude/Gemini: the saved conversation is gone or belongs to
-            // another working directory.
+            // Claude: the saved conversation is gone or belongs to another
+            // working directory. (Antigravity silently starts a new one.)
             || text.contains("no conversation found with session id")
-            || text.contains("invalid session identifier")
             || (text.contains("rollout")
                 && text.contains("thread id")
                 && text.contains("code -32600"))
@@ -1034,7 +1033,7 @@ pub(super) fn effective_agent_model(
     let configured = match vendor {
         AgentVendor::Codex => None,
         AgentVendor::Claude => shared.agents.claude.default_model(),
-        AgentVendor::Gemini => shared.agents.gemini.default_model(),
+        AgentVendor::Antigravity => shared.agents.antigravity.default_model(),
     };
     state.model.clone().or(configured.map(str::to_string))
 }

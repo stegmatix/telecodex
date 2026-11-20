@@ -109,7 +109,7 @@ pub(super) fn sample_config(db_path: PathBuf, default_cwd: PathBuf) -> Config {
             import_cli_history: true,
         },
         claude: toml::from_str("").unwrap(),
-        gemini: toml::from_str("").unwrap(),
+        antigravity: toml::from_str("").unwrap(),
         db_path,
         startup_admin_ids: vec![],
         poll_timeout_seconds: 30,
@@ -1649,13 +1649,11 @@ fn supports_gpt6_max_reasoning_effort() {
 }
 
 #[test]
-fn detects_stale_claude_and_gemini_sessions() {
+fn detects_stale_claude_sessions() {
     let claude = anyhow::anyhow!(
         "claude turn failed: No conversation found with session ID: 0199aaaa-0000-7000-8000-000000000000"
     );
-    let gemini = anyhow::anyhow!("gemini turn failed: Invalid session identifier \"0199\".");
     assert!(should_reset_session_after_error(&claude));
-    assert!(should_reset_session_after_error(&gemini));
 }
 
 #[test]
@@ -1665,8 +1663,8 @@ fn agent_texts_name_the_vendors() {
     assert!(switched.contains("`codex` → `claude`"));
     assert!(switched.contains("/new"));
     assert!(
-        codex_only_text("/limits", AgentVendor::Gemini)
-            .contains("`/limits` is Codex-only, but the active agent is `gemini`")
+        codex_only_text("/limits", AgentVendor::Antigravity)
+            .contains("`/limits` is Codex-only, but the active agent is `antigravity`")
     );
     let state = AgentSessionState {
         thread_id: Some("abc".to_string()),
@@ -1795,7 +1793,7 @@ async fn voice_consumer_queries_resolve_turns_for_every_vendor() {
     // Each vendor kept its own conversation, so switching back resumes it.
     let session = store.get_session(key).unwrap().unwrap();
     assert_eq!(session.codex_thread_id.as_deref(), Some("codex-session"));
-    for vendor in [AgentVendor::Claude, AgentVendor::Gemini] {
+    for vendor in [AgentVendor::Claude, AgentVendor::Antigravity] {
         assert_eq!(
             store
                 .agent_session_state(&session, vendor)
@@ -1832,7 +1830,7 @@ fn agent_banner_names_non_codex_vendor() {
         Some("🤖 Claude · `opus`")
     );
     assert_eq!(
-        with_agent_banner(Some("⚡ fast".to_string()), AgentVendor::Gemini, None).as_deref(),
-        Some("🤖 Gemini · `default`\n⚡ fast")
+        with_agent_banner(Some("⚡ fast".to_string()), AgentVendor::Antigravity, None).as_deref(),
+        Some("🤖 Antigravity · `default`\n⚡ fast")
     );
 }

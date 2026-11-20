@@ -35,7 +35,7 @@ default_add_dirs = [
   "/absolute/path/to/workspace"
 ]
 
-# Optional agent backends, selected globally with /agent codex|claude|gemini.
+# Optional agent backends, selected globally with /agent codex|claude|antigravity.
 [claude]
 binary = "claude"
 # default_model = "opus"
@@ -43,10 +43,8 @@ models = ["opus", "sonnet", "haiku"]
 # permission_mode = "bypassPermissions"  # default: derived from the session sandbox
 # extra_args = []
 
-[gemini]
-binary = "gemini"
-# default_model = "gemini-2.5-pro"
-models = ["gemini-2.5-pro", "gemini-2.5-flash"]
-# approval_mode = "yolo"  # default: derived from the session sandbox
-# skip_trust = true
+[antigravity]
+binary = "agy"
+# default_model = "gemini-4-neon-high"
+# permission_mode = "skip-permissions"  # default: derived from the session sandbox
 # extra_args = []

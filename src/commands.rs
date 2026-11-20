@@ -96,7 +96,7 @@ pub fn parse_command(command: &str, args: &str, original_text: &str) -> Result<P
             vendor: match non_empty(args) {
                 Some(value) => Some(
                     AgentVendor::parse(value)
-                        .ok_or_else(|| anyhow::anyhow!("/agent <codex|claude|gemini>"))?,
+                        .ok_or_else(|| anyhow::anyhow!("/agent <codex|claude|antigravity>"))?,
                 ),
                 None => None,
             },
@@ -185,7 +185,7 @@ pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
     match command {
         "/agent" => Some(choice_help(
             "Agent CLI",
-            &["/agent codex", "/agent claude", "/agent gemini"],
+            &["/agent codex", "/agent claude", "/agent antigravity"],
         )),
         "/approval" => Some(choice_help(
             "Approval policy",
@@ -274,7 +274,7 @@ pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
 pub fn default_bot_commands() -> Vec<BotCommand> {
     vec![
         bot_command("help", "Show Codex help"),
-        bot_command("agent", "Switch agent CLI: codex, claude or gemini"),
+        bot_command("agent", "Switch agent CLI: codex, claude or antigravity"),
         bot_command("status", "Show status for this session"),
         bot_command("login", "Log in to Codex with device code"),
         bot_command("logout", "Remove stored Codex credentials"),
@@ -510,7 +510,8 @@ mod tests {
         for (arg, expected) in [
             ("codex", AgentVendor::Codex),
             ("Claude", AgentVendor::Claude),
-            ("gemini", AgentVendor::Gemini),
+            ("antigravity", AgentVendor::Antigravity),
+            ("gemini", AgentVendor::Antigravity),
         ] {
             let parsed = parse_command("/agent", arg, &format!("/agent {arg}")).unwrap();
             match parsed {
@@ -521,13 +522,13 @@ mod tests {
             }
         }
         let error = parse_command("/agent", "gpt", "/agent gpt").unwrap_err();
-        assert!(error.to_string().contains("codex|claude|gemini"));
+        assert!(error.to_string().contains("codex|claude|antigravity"));
         let help = command_help("/agent", "").unwrap();
         assert_eq!(
             help.quick_commands,
             vec![
                 vec!["/agent codex".to_string(), "/agent claude".to_string()],
-                vec!["/agent gemini".to_string()],
+                vec!["/agent antigravity".to_string()],
             ]
         );
         // `/agents` stays a forwarded Codex slash command.
