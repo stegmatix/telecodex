@@ -1857,4 +1857,18 @@ mod tests {
         assert!(!turn_completed);
         assert_eq!(active_turn_id.as_deref(), Some("turn-1"));
     }
+
+    /// Live protocol check against the installed CLI without spending a turn:
+    /// `cargo test live_codex -- --ignored`.
+    #[tokio::test]
+    #[ignore = "spawns the real codex app-server"]
+    async fn live_codex_app_server_lists_models() {
+        let binary =
+            std::env::var("TELECODEX_LIVE_CODEX_BINARY").unwrap_or_else(|_| "codex".into());
+        let models = CodexRunner::new(PathBuf::from(binary))
+            .read_models()
+            .await
+            .unwrap();
+        assert!(!models.is_empty());
+    }
 }

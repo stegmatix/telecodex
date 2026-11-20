@@ -355,4 +355,63 @@ mod tests {
         session.session_prompt = None;
         assert_eq!(gemini_stdin(&session, &request), "hello");
     }
+
+    /// Live check against the installed CLI: `cargo test live_gemini -- --ignored`.
+    #[tokio::test]
+    #[ignore = "spawns the real gemini CLI and needs a logged-in account"]
+    async fn live_gemini_new_then_resumed_turn() {
+        use crate::agent::{AgentRunners, AgentVendor};
+        let workspace = tempfile::tempdir().unwrap();
+        let mut session = session("read-only");
+        session.cwd = workspace.path().to_path_buf();
+        session.add_dirs.clear();
+        let mut runners = AgentRunners::for_tests();
+        if let Ok(model) = std::env::var("TELECODEX_LIVE_GEMINI_MODEL") {
+            let mut config = config();
+            config.default_model = Some(model);
+            runners.gemini = GeminiRunner::new(config);
+        }
+
+        let turn = |prompt: &str, state: AgentSessionState| {
+            let request = TurnRequest {
+                session_key: session.key,
+                from_user_id: 1,
+                prompt: prompt.to_string(),
+                runtime_instructions: None,
+                attachments: vec![],
+                review_mode: None,
+                override_search_mode: None,
+                guest_query_id: None,
+                guest_inline_message_id: None,
+            };
+            let runners = runners.clone();
+            let session = session.clone();
+            async move {
+                runners
+                    .run_turn(
+                        AgentVendor::Gemini,
+                        &session,
+                        &state,
+                        &request,
+                        tokio_util::sync::CancellationToken::new(),
+                        |_| async { Ok(crate::codex::CodexEventOutcome::None) },
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let first = turn("Reply with exactly: pong", AgentSessionState::default()).await;
+        assert_eq!(first.assistant_text.trim().to_lowercase(), "pong");
+        let thread_id = first.thread_id.clone().expect("gemini session id");
+        let second = turn(
+            "What exact word did you reply with last time? Reply with just that word.",
+            AgentSessionState {
+                thread_id: Some(thread_id.clone()),
+                model: None,
+            },
+        )
+        .await;
+        assert_eq!(second.thread_id.as_deref(), Some(thread_id.as_str()));
+        assert!(second.assistant_text.to_lowercase().contains("pong"));
+    }
 }
