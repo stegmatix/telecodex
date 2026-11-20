@@ -132,7 +132,8 @@ High-level flow:
 
 | Command | Purpose |
 | --- | --- |
-| `/new [title]` | Start a fresh Codex session in the current topic/chat |
+| `/agent [codex\|claude\|antigravity]` | Show or (admin) switch the global agent CLI used for every chat, topic and voice turn |
+| `/new [title]` | Start a fresh session for the active agent in the current topic/chat |
 | `/topic [title]` | Create a new Telegram topic and copy the current environment into it |
 | `/use <thread_id_prefix\|latest>` | Switch this Telegram session to an existing Codex thread |
 | `/review [--uncommitted] [--base BRANCH] [--commit SHA] [--title TITLE] [prompt]` | Run `codex review`-style flows |
@@ -163,6 +164,16 @@ High-level flow:
 | `/restart_bot` | Admin: restart the bot process |
 
 `/model` accepts any Codex model id. When the live Codex catalog is unavailable, Telecodex still offers quick picks for the latest known ChatGPT/Codex models.
+
+### Agent vendors
+
+Telecodex runs turns through one global agent CLI, chosen with `/agent` and stored in the database (default `codex`):
+
+- `codex`: `codex app-server` (all features).
+- `claude`: `claude -p --output-format stream-json`, prompt on stdin, `--session-id`/`--resume` per chat, session `cwd`, `--append-system-prompt` for the session prompt, `--add-dir` for extra dirs, `--effort` from `/think`.
+- `antigravity`: Google's Antigravity CLI (`agy`, which replaces the Gemini CLI for personal accounts): `agy --output-format stream-json --input-format stream-json`, the turn sent as one NDJSON user message on stdin, `--conversation` per chat, `--add-dir` for extra dirs. `/agent gemini` is accepted as an alias. Effort is part of the model id (e.g. `gemini-4-neon-high`), so `/think` does not apply.
+
+Each vendor keeps its own conversation per Telegram session: Claude never sees the Codex conversation, and switching back resumes the previous vendor's conversation. `/new` and `/clear` reset only the active vendor. With Claude or Antigravity active, `/model` lists models for that vendor (live `agy models` for Antigravity, the configured `models` otherwise) and stores the choice per session; `/limits`, `/login`, `/logout` and `/review` are Codex-only and say so. Tool approvals are not relayed for Claude/Antigravity: their permission mode follows the session sandbox (see configuration notes).
 
 The example config uses GPT-6 Astra (`gpt-6-astra`) with `xhigh` reasoning. Select it with `/model gpt-6-astra`; `/think max` is also supported. Existing sessions keep their selected model until you change it or run `/model default`.
 
@@ -312,6 +323,17 @@ Telecodex will start `codex login --device-auth`, send a clickable `auth.openai.
 - `codex.default_add_dirs` entries must also be absolute existing directories.
 - `codex.import_desktop_history` and `codex.import_cli_history` control session import sources.
 - `codex.default_search_mode` supports `disabled`, `live`, and `cached`.
+
+### Claude and Antigravity
+
+Both sections are optional; a missing binary only fails turns once that vendor is selected. Each CLI uses its own login on the host (`claude` and `agy` run interactively once as the service user).
+
+- `claude.binary` / `antigravity.binary` (default `claude` / `agy`): binary name or absolute path.
+- `default_model`: model used when the session has no `/model` override (unset = CLI default).
+- `models`: quick picks for `/model` (Claude: `opus`, `sonnet`, `haiku`; Antigravity uses them only when `agy models` fails).
+- `claude.permission_mode`: `--permission-mode` override. By default the session sandbox maps `danger-full-access` → `bypassPermissions`, `workspace-write` → `acceptEdits`, `read-only` → `default`.
+- `antigravity.permission_mode`: `skip-permissions` (`--dangerously-skip-permissions`), `accept-edits`, `auto`, `plan` (`--mode`) or `default`. Default mapping: `danger-full-access` → `skip-permissions`, `workspace-write` → `accept-edits`, `read-only` → `default`. In `default` mode headless `agy` denies shell commands; a turn whose only result is a denial is reported as failed.
+- `extra_args`: appended verbatim to every invocation.
 
 ### Environment variables
 

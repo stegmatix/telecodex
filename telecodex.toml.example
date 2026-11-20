@@ -34,3 +34,17 @@ seed_workspaces = ["/absolute/path/to/workspace-a"]
 default_add_dirs = [
   "/absolute/path/to/workspace"
 ]
+
+# Optional agent backends, selected globally with /agent codex|claude|antigravity.
+[claude]
+binary = "claude"
+# default_model = "opus"
+models = ["opus", "sonnet", "haiku"]
+# permission_mode = "bypassPermissions"  # default: derived from the session sandbox
+# extra_args = []
+
+[antigravity]
+binary = "agy"
+# default_model = "gemini-4-neon-high"
+# permission_mode = "skip-permissions"  # default: derived from the session sandbox
+# extra_args = []

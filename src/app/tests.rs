@@ -1,3 +1,4 @@
+use super::agents::{agent_switched_text, codex_only_text};
 use super::*;
 use crate::config::SearchMode;
 use std::path::PathBuf;
@@ -107,6 +108,8 @@ pub(super) fn sample_config(db_path: PathBuf, default_cwd: PathBuf) -> Config {
             import_desktop_history: true,
             import_cli_history: true,
         },
+        claude: toml::from_str("").unwrap(),
+        antigravity: toml::from_str("").unwrap(),
         db_path,
         startup_admin_ids: vec![],
         poll_timeout_seconds: 30,
@@ -1433,7 +1436,7 @@ async fn upload_failure_marks_turn_failed_and_cleanup_still_runs() {
         transcript: None,
     };
     let summary = crate::codex::RunSummary {
-        codex_thread_id: Some("thread-123".to_string()),
+        thread_id: Some("thread-123".to_string()),
         assistant_text: "answer".to_string(),
         stderr_text: String::new(),
     };
@@ -1444,6 +1447,7 @@ async fn upload_failure_marks_turn_failed_and_cleanup_still_runs() {
         ForegroundTurnSuccess {
             store: &store,
             session: &session,
+            vendor: crate::agent::AgentVendor::Codex,
             turn_id,
             review_mode: false,
             summary: &summary,
@@ -1520,7 +1524,7 @@ fn rebinds_stale_session_to_latest_active_thread_for_same_cwd() {
             "test-token".to_string(),
             "https://api.telegram.org".to_string(),
         ),
-        codex: CodexRunner::new(PathBuf::from("codex")),
+        agents: crate::agent::AgentRunners::for_tests(),
         bot_username: None,
         service_user_id: 0,
         transcription_backend: None,
@@ -1582,7 +1586,7 @@ fn keeps_truly_archived_session_unbound_when_no_active_replacement_exists() {
             "test-token".to_string(),
             "https://api.telegram.org".to_string(),
         ),
-        codex: CodexRunner::new(PathBuf::from("codex")),
+        agents: crate::agent::AgentRunners::for_tests(),
         bot_username: None,
         service_user_id: 0,
         transcription_backend: None,
@@ -1642,4 +1646,191 @@ fn offers_gpt6_without_catalog_and_deduplicates_live_model() {
 fn supports_gpt6_max_reasoning_effort() {
     assert_eq!(normalize_reasoning_effort(" MAX ").unwrap(), "max");
     assert!(normalize_reasoning_effort("unsupported").is_err());
+}
+
+#[test]
+fn detects_stale_claude_sessions() {
+    let claude = anyhow::anyhow!(
+        "claude turn failed: No conversation found with session ID: 0199aaaa-0000-7000-8000-000000000000"
+    );
+    assert!(should_reset_session_after_error(&claude));
+}
+
+#[test]
+fn agent_texts_name_the_vendors() {
+    use crate::agent::{AgentSessionState, AgentVendor};
+    let switched = agent_switched_text(AgentVendor::Codex, AgentVendor::Claude);
+    assert!(switched.contains("`codex` → `claude`"));
+    assert!(switched.contains("/new"));
+    assert!(
+        codex_only_text("/limits", AgentVendor::Antigravity)
+            .contains("`/limits` is Codex-only, but the active agent is `antigravity`")
+    );
+    let state = AgentSessionState {
+        thread_id: Some("abc".to_string()),
+        model: None,
+    };
+    let status = format_agent_status_line(AgentVendor::Claude, &state, Some("opus".to_string()));
+    assert!(status.contains("**Agent:** `claude`"));
+    assert!(status.contains("Claude session: `abc`"));
+    assert!(status.contains("Claude model: `opus`"));
+    assert_eq!(
+        format_agent_status_line(AgentVendor::Codex, &state, None),
+        "**Agent:** `codex`"
+    );
+}
+
+/// Mirrors `TelecodexTurnStore` in Helen's `scripts/ops/magic_button_consumer.py`:
+/// the voice button reads these tables directly, so every vendor must leave the
+/// same `sessions`/`turns` footprint.
+#[tokio::test]
+async fn voice_consumer_queries_resolve_turns_for_every_vendor() {
+    use crate::agent::AgentVendor;
+    use rusqlite::{Connection, OpenFlags, params};
+
+    let tmp = NamedTempFile::new().unwrap();
+    let store = Store::open(tmp.path(), &[100], &sample_defaults()).unwrap();
+    let key = SessionKey::new(4242, None);
+    store.ensure_session(key, 100, &sample_defaults()).unwrap();
+    let reader = Connection::open_with_flags(
+        tmp.path(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .unwrap();
+    reader.execute_batch("PRAGMA query_only = ON").unwrap();
+    let anchor = |reader: &Connection| -> (i64, i64) {
+        reader
+            .query_row(
+                "SELECT
+                   (SELECT COALESCE(MAX(id), 0) FROM turns) AS turn_floor,
+                   sessions.id
+                 FROM sessions
+                 WHERE sessions.chat_id = ?
+                   AND sessions.thread_id = ?",
+                params![key.chat_id, key.thread_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    let resolutions = |reader: &Connection, after: i64, session_id: i64, prompt: &str| {
+        let mut stmt = reader
+            .prepare(
+                "SELECT id, status, assistant_text
+                   FROM turns
+                  WHERE id > ?
+                    AND session_id = ?
+                    AND from_user_id = ?
+                    AND prompt = ?
+                  ORDER BY id ASC",
+            )
+            .unwrap();
+        stmt.query_map(params![after, session_id, 100, prompt], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+
+    for (index, vendor) in AgentVendor::ALL.into_iter().enumerate() {
+        store.set_agent_vendor(vendor).unwrap();
+        // `/agent` and `/new` must never replace the sessions row the voice
+        // consumer anchored on.
+        let session = store.get_session(key).unwrap().unwrap();
+        store.clear_agent_conversation(&session, vendor).unwrap();
+        let (turn_floor, session_id) = anchor(&reader);
+        assert_eq!(session_id, session.id);
+
+        let transcript = format!("voice command {index}");
+        let mut request = sample_turn_request(key);
+        request.prompt = transcript.clone();
+        let turn_id = store.record_turn_started(session.id, &request).unwrap();
+        let pending = resolutions(&reader, turn_floor, session_id, &transcript);
+        assert_eq!(pending, vec![(turn_id, "running".to_string(), None)]);
+
+        let summary = crate::codex::RunSummary {
+            thread_id: Some(format!("{}-session", vendor.as_str())),
+            assistant_text: format!("{} answer", vendor.label()),
+            stderr_text: String::new(),
+        };
+        finalize_foreground_turn(
+            ForegroundTurnSuccess {
+                store: &store,
+                session: &session,
+                vendor,
+                turn_id,
+                review_mode: false,
+                summary: &summary,
+            },
+            || async { Ok(()) },
+            || async { Ok(()) },
+            |_| async { Ok(()) },
+        )
+        .await
+        .unwrap();
+
+        let resolved = resolutions(&reader, turn_floor, session_id, &transcript);
+        assert_eq!(
+            resolved,
+            vec![(
+                turn_id,
+                "completed".to_string(),
+                Some(format!("{} answer", vendor.label()))
+            )]
+        );
+        let session = store.get_session(key).unwrap().unwrap();
+        let state = store.agent_session_state(&session, vendor).unwrap();
+        assert_eq!(
+            state.thread_id.as_deref(),
+            Some(format!("{}-session", vendor.as_str()).as_str())
+        );
+    }
+
+    // Each vendor kept its own conversation, so switching back resumes it.
+    let session = store.get_session(key).unwrap().unwrap();
+    assert_eq!(session.codex_thread_id.as_deref(), Some("codex-session"));
+    for vendor in [AgentVendor::Claude, AgentVendor::Antigravity] {
+        assert_eq!(
+            store
+                .agent_session_state(&session, vendor)
+                .unwrap()
+                .thread_id
+                .as_deref(),
+            Some(format!("{}-session", vendor.as_str()).as_str())
+        );
+    }
+
+    // Failed vendor turns surface the statuses the consumer maps to errors.
+    let (turn_floor, session_id) = anchor(&reader);
+    let mut request = sample_turn_request(key);
+    request.prompt = "broken".to_string();
+    let turn_id = store.record_turn_started(session.id, &request).unwrap();
+    store
+        .record_turn_finished(turn_id, "cancelled", None)
+        .unwrap();
+    assert_eq!(
+        resolutions(&reader, turn_floor, session_id, "broken"),
+        vec![(turn_id, "cancelled".to_string(), None)]
+    );
+}
+
+#[test]
+fn agent_banner_names_non_codex_vendor() {
+    use crate::agent::AgentVendor;
+    assert_eq!(
+        with_agent_banner(Some("limits".to_string()), AgentVendor::Codex, None).as_deref(),
+        Some("limits")
+    );
+    assert_eq!(
+        with_agent_banner(None, AgentVendor::Claude, Some("opus".to_string())).as_deref(),
+        Some("🤖 Claude · `opus`")
+    );
+    assert_eq!(
+        with_agent_banner(Some("⚡ fast".to_string()), AgentVendor::Antigravity, None).as_deref(),
+        Some("🤖 Antigravity · `default`\n⚡ fast")
+    );
 }

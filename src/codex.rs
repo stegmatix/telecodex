@@ -27,7 +27,7 @@ pub struct CodexRunner {
     binary: PathBuf,
 }
 pub struct RunSummary {
-    pub codex_thread_id: Option<String>,
+    pub thread_id: Option<String>,
     pub assistant_text: String,
     pub stderr_text: String,
 }
@@ -370,7 +370,7 @@ where
     process.initialize().await?;
     let thread_id = process.start_or_resume_thread(session, request).await?;
     let mut summary = RunSummary {
-        codex_thread_id: Some(thread_id.clone()),
+        thread_id: Some(thread_id.clone()),
         assistant_text: String::new(),
         stderr_text: String::new(),
     };
@@ -449,7 +449,7 @@ where
                 .and_then(|t| t.get("id"))
                 .and_then(Value::as_str)
             {
-                summary.codex_thread_id = Some(thread_id.to_string());
+                summary.thread_id = Some(thread_id.to_string());
                 let _ = on_event(CodexEvent::ThreadStarted(thread_id.to_string())).await?;
             }
         }
@@ -667,14 +667,14 @@ where
     });
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut summary = RunSummary {
-        codex_thread_id: None,
+        thread_id: None,
         assistant_text: String::new(),
         stderr_text: String::new(),
     };
     loop {
         tokio::select! {
           _=cancel.cancelled()=>{terminate_child(&mut child).await; let _=stderr_task.await; bail!("codex turn cancelled");}
-          next_line=stdout_lines.next_line()=>{match next_line.context("reading codex stdout failed")?{Some(line)=>{if let Some(event)=parse_exec_event(&line)?{match &event{CodexEvent::ThreadStarted(thread_id)=>summary.codex_thread_id=Some(thread_id.clone()),CodexEvent::AssistantText(text)=>summary.assistant_text=text.clone(),CodexEvent::Progress(_)|CodexEvent::ApprovalRequest(_)=>{}} let _ = on_event(event).await?;}},None=>break,}}
+          next_line=stdout_lines.next_line()=>{match next_line.context("reading codex stdout failed")?{Some(line)=>{if let Some(event)=parse_exec_event(&line)?{match &event{CodexEvent::ThreadStarted(thread_id)=>summary.thread_id=Some(thread_id.clone()),CodexEvent::AssistantText(text)=>summary.assistant_text=text.clone(),CodexEvent::Progress(_)|CodexEvent::ApprovalRequest(_)=>{}} let _ = on_event(event).await?;}},None=>break,}}
         }
     }
     let status = child.wait().await.context("waiting for codex failed")?;
@@ -1327,7 +1327,7 @@ fn format_rpc_error(error: &RpcError) -> String {
     }
     parts.join(" | ")
 }
-fn spawnable_command(spec: &CommandSpec) -> Command {
+pub(crate) fn spawnable_command(spec: &CommandSpec) -> Command {
     #[cfg(windows)]
     {
         let ext = spec
@@ -1372,7 +1372,7 @@ fn sanitize_arg_path(path: &Path) -> String {
     }
     path.display().to_string()
 }
-async fn terminate_child(child: &mut Child) {
+pub(crate) async fn terminate_child(child: &mut Child) {
     match child.try_wait() {
         Ok(Some(_)) => {}
         Ok(None) => {
@@ -1693,7 +1693,7 @@ mod tests {
     #[tokio::test]
     async fn completes_turn_when_legacy_thread_goes_idle_after_agent_message() {
         let mut summary = RunSummary {
-            codex_thread_id: None,
+            thread_id: None,
             assistant_text: String::new(),
             stderr_text: String::new(),
         };
@@ -1750,7 +1750,7 @@ mod tests {
     #[tokio::test]
     async fn ignores_idle_without_completed_agent_message() {
         let mut summary = RunSummary {
-            codex_thread_id: None,
+            thread_id: None,
             assistant_text: String::new(),
             stderr_text: String::new(),
         };
@@ -1784,7 +1784,7 @@ mod tests {
     #[tokio::test]
     async fn completes_turn_on_final_answer_item_completed() {
         let mut summary = RunSummary {
-            codex_thread_id: None,
+            thread_id: None,
             assistant_text: String::new(),
             stderr_text: String::new(),
         };
@@ -1823,7 +1823,7 @@ mod tests {
     #[tokio::test]
     async fn commentary_agent_message_does_not_complete_turn() {
         let mut summary = RunSummary {
-            codex_thread_id: None,
+            thread_id: None,
             assistant_text: String::new(),
             stderr_text: String::new(),
         };
@@ -1856,5 +1856,19 @@ mod tests {
         assert!(assistant_message_completed);
         assert!(!turn_completed);
         assert_eq!(active_turn_id.as_deref(), Some("turn-1"));
+    }
+
+    /// Live protocol check against the installed CLI without spending a turn:
+    /// `cargo test live_codex -- --ignored`.
+    #[tokio::test]
+    #[ignore = "spawns the real codex app-server"]
+    async fn live_codex_app_server_lists_models() {
+        let binary =
+            std::env::var("TELECODEX_LIVE_CODEX_BINARY").unwrap_or_else(|_| "codex".into());
+        let models = CodexRunner::new(PathBuf::from(binary))
+            .read_models()
+            .await
+            .unwrap();
+        assert!(!models.is_empty());
     }
 }

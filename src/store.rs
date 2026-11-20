@@ -10,11 +10,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::{
+    agent::{AgentSessionState, AgentVendor},
     config::{CodexConfig, SearchMode},
     models::{ReviewRequest, SessionKey, SessionRecord, TurnRequest, UserRecord, UserRole},
 };
 
 pub const INSTANCE_LOCK_LOST_ERROR: &str = "Telecodex database instance lock was lost";
+const AGENT_VENDOR_STATE_KEY: &str = "agent_vendor";
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -397,6 +399,111 @@ impl Store {
         )
     }
 
+    /// Global agent vendor used for new turns. Defaults to Codex.
+    pub fn agent_vendor(&self) -> Result<AgentVendor> {
+        match self.bot_state_value(AGENT_VENDOR_STATE_KEY)? {
+            Some(value) => AgentVendor::parse(&value)
+                .ok_or_else(|| anyhow!("unsupported stored agent vendor `{value}`")),
+            None => Ok(AgentVendor::Codex),
+        }
+    }
+
+    pub fn set_agent_vendor(&self, vendor: AgentVendor) -> Result<()> {
+        self.save_bot_state(AGENT_VENDOR_STATE_KEY, vendor.as_str())
+    }
+
+    /// Conversation id and model a non-Codex vendor keeps for one Telegram
+    /// session. Codex keeps using the legacy `sessions` columns.
+    pub fn agent_session_state(
+        &self,
+        session: &SessionRecord,
+        vendor: AgentVendor,
+    ) -> Result<AgentSessionState> {
+        if vendor == AgentVendor::Codex {
+            return Ok(AgentSessionState {
+                thread_id: session.codex_thread_id.clone(),
+                model: session.model.clone(),
+            });
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let state = conn
+            .query_row(
+                "SELECT thread_id, model FROM agent_sessions WHERE session_id = ?1 AND vendor = ?2",
+                params![session.id, vendor.as_str()],
+                |row| {
+                    Ok(AgentSessionState {
+                        thread_id: row.get(0)?,
+                        model: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(state.unwrap_or_default())
+    }
+
+    pub fn set_agent_thread(
+        &self,
+        session: &SessionRecord,
+        vendor: AgentVendor,
+        thread_id: Option<&str>,
+    ) -> Result<()> {
+        if vendor == AgentVendor::Codex {
+            return match thread_id {
+                Some(thread_id) => self.set_session_codex_thread(session.key, thread_id),
+                None => self.clear_session_conversation(session.key),
+            };
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO agent_sessions(session_id, vendor, thread_id, model, updated_at)
+             VALUES (?1, ?2, ?3, NULL, ?4)
+             ON CONFLICT(session_id, vendor) DO UPDATE
+             SET thread_id = excluded.thread_id, updated_at = excluded.updated_at",
+            params![session.id, vendor.as_str(), thread_id, now_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_agent_model(
+        &self,
+        session: &SessionRecord,
+        vendor: AgentVendor,
+        model: Option<&str>,
+    ) -> Result<()> {
+        if vendor == AgentVendor::Codex {
+            return self.set_session_model(session.key, model);
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "INSERT INTO agent_sessions(session_id, vendor, thread_id, model, updated_at)
+             VALUES (?1, ?2, NULL, ?3, ?4)
+             ON CONFLICT(session_id, vendor) DO UPDATE
+             SET model = excluded.model, updated_at = excluded.updated_at",
+            params![session.id, vendor.as_str(), model, now_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Starts a fresh conversation for `vendor` only; other vendors keep their
+    /// saved conversation so switching back resumes it.
+    pub fn clear_agent_conversation(
+        &self,
+        session: &SessionRecord,
+        vendor: AgentVendor,
+    ) -> Result<()> {
+        if vendor == AgentVendor::Codex {
+            return self.clear_session_conversation(session.key);
+        }
+        self.set_agent_thread(session, vendor, None)?;
+        self.update_session_field(
+            session.key,
+            "UPDATE sessions
+             SET busy = 0, last_assistant_text = NULL, updated_at = ?3
+             WHERE chat_id = ?1 AND thread_id = ?2",
+            params![session.key.chat_id, session.key.thread_id, now_string()],
+        )
+    }
+
     pub fn set_session_cwd(&self, key: SessionKey, cwd: &Path) -> Result<()> {
         self.update_session_field(
             key,
@@ -661,6 +768,16 @@ impl Store {
                 action TEXT NOT NULL,
                 details_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_sessions(
+                session_id INTEGER NOT NULL,
+                vendor TEXT NOT NULL,
+                thread_id TEXT,
+                model TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(session_id, vendor),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS app_instance_lock(
@@ -1070,5 +1187,108 @@ mod tests {
         assert_eq!(retry.from_user_id, 200);
         assert_eq!(retry.prompt, "hello");
         assert!(retry.review_mode.is_none());
+    }
+
+    #[test]
+    fn persists_global_agent_vendor_across_restarts() {
+        let tmp = NamedTempFile::new().unwrap();
+        {
+            let store = Store::open(tmp.path(), &[1], &defaults()).unwrap();
+            assert_eq!(store.agent_vendor().unwrap(), AgentVendor::Codex);
+            store.set_agent_vendor(AgentVendor::Claude).unwrap();
+            assert_eq!(store.agent_vendor().unwrap(), AgentVendor::Claude);
+        }
+        let store = Store::open(tmp.path(), &[1], &defaults()).unwrap();
+        assert_eq!(store.agent_vendor().unwrap(), AgentVendor::Claude);
+        store.save_bot_state("agent_vendor", "gpt").unwrap();
+        assert!(store.agent_vendor().is_err());
+    }
+
+    #[test]
+    fn keeps_agent_conversations_and_models_per_vendor() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = Store::open(tmp.path(), &[1], &defaults()).unwrap();
+        let key = SessionKey::new(10, None);
+        store.ensure_session(key, 1, &defaults()).unwrap();
+        store.set_session_codex_thread(key, "codex-thread").unwrap();
+        let session = store.get_session(key).unwrap().unwrap();
+
+        assert_eq!(
+            store
+                .agent_session_state(&session, AgentVendor::Claude)
+                .unwrap(),
+            AgentSessionState::default()
+        );
+        store
+            .set_agent_thread(&session, AgentVendor::Claude, Some("claude-1"))
+            .unwrap();
+        store
+            .set_agent_model(&session, AgentVendor::Claude, Some("opus"))
+            .unwrap();
+        store
+            .set_agent_thread(&session, AgentVendor::Antigravity, Some("agy-1"))
+            .unwrap();
+        let claude = store
+            .agent_session_state(&session, AgentVendor::Claude)
+            .unwrap();
+        assert_eq!(claude.thread_id.as_deref(), Some("claude-1"));
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        // Setting the thread must not wipe the stored model and vice versa.
+        store
+            .set_agent_thread(&session, AgentVendor::Claude, Some("claude-2"))
+            .unwrap();
+        let claude = store
+            .agent_session_state(&session, AgentVendor::Claude)
+            .unwrap();
+        assert_eq!(claude.thread_id.as_deref(), Some("claude-2"));
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+
+        // Codex reads the legacy columns, untouched by other vendors.
+        let codex = store
+            .agent_session_state(&session, AgentVendor::Codex)
+            .unwrap();
+        assert_eq!(codex.thread_id.as_deref(), Some("codex-thread"));
+        assert_eq!(codex.model, session.model);
+
+        store.set_last_assistant_text(key, Some("hi")).unwrap();
+        store
+            .clear_agent_conversation(&session, AgentVendor::Claude)
+            .unwrap();
+        let claude = store
+            .agent_session_state(&session, AgentVendor::Claude)
+            .unwrap();
+        assert_eq!(claude.thread_id, None);
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert_eq!(store.last_assistant_text(key).unwrap(), None);
+        assert_eq!(
+            store
+                .agent_session_state(&session, AgentVendor::Antigravity)
+                .unwrap()
+                .thread_id
+                .as_deref(),
+            Some("agy-1")
+        );
+        let reloaded = store.get_session(key).unwrap().unwrap();
+        assert_eq!(reloaded.id, session.id);
+        assert_eq!(reloaded.codex_thread_id.as_deref(), Some("codex-thread"));
+    }
+
+    #[test]
+    fn deleting_a_session_removes_its_agent_rows() {
+        let tmp = NamedTempFile::new().unwrap();
+        let store = Store::open(tmp.path(), &[1], &defaults()).unwrap();
+        let key = SessionKey::new(11, None);
+        let session = store.ensure_session(key, 1, &defaults()).unwrap();
+        store
+            .set_agent_thread(&session, AgentVendor::Antigravity, Some("g"))
+            .unwrap();
+        store.delete_session(key).unwrap();
+        let session = store.ensure_session(key, 1, &defaults()).unwrap();
+        assert_eq!(
+            store
+                .agent_session_state(&session, AgentVendor::Antigravity)
+                .unwrap(),
+            AgentSessionState::default()
+        );
     }
 }

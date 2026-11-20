@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::{config::SearchMode, models::ReviewRequest, telegram::BotCommand};
+use crate::{agent::AgentVendor, config::SearchMode, models::ReviewRequest, telegram::BotCommand};
 
 #[derive(Debug, Clone)]
 pub struct CommandHelp {
@@ -16,6 +16,7 @@ pub enum ParsedInput {
 
 #[derive(Debug, Clone)]
 pub enum BridgeCommand {
+    Agent { vendor: Option<AgentVendor> },
     Login,
     Logout,
     New { title: Option<String> },
@@ -91,6 +92,15 @@ pub fn parse_command(command: &str, args: &str, original_text: &str) -> Result<P
     }
 
     let bridge = match command {
+        "/agent" => BridgeCommand::Agent {
+            vendor: match non_empty(args) {
+                Some(value) => Some(
+                    AgentVendor::parse(value)
+                        .ok_or_else(|| anyhow::anyhow!("/agent <codex|claude|antigravity>"))?,
+                ),
+                None => None,
+            },
+        },
         "/login" => BridgeCommand::Login,
         "/logout" => BridgeCommand::Logout,
         "/new" => BridgeCommand::New {
@@ -173,6 +183,10 @@ pub fn parse_command(command: &str, args: &str, original_text: &str) -> Result<P
 
 pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
     match command {
+        "/agent" => Some(choice_help(
+            "Agent CLI",
+            &["/agent codex", "/agent claude", "/agent antigravity"],
+        )),
         "/approval" => Some(choice_help(
             "Approval policy",
             &[
@@ -260,6 +274,7 @@ pub fn command_help(command: &str, args: &str) -> Option<CommandHelp> {
 pub fn default_bot_commands() -> Vec<BotCommand> {
     vec![
         bot_command("help", "Show Codex help"),
+        bot_command("agent", "Switch agent CLI: codex, claude or antigravity"),
         bot_command("status", "Show status for this session"),
         bot_command("login", "Log in to Codex with device code"),
         bot_command("logout", "Remove stored Codex credentials"),
@@ -486,6 +501,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_command() {
+        let show = parse_command("/agent", "", "/agent").unwrap();
+        assert!(matches!(
+            show,
+            ParsedInput::Bridge(BridgeCommand::Agent { vendor: None })
+        ));
+        for (arg, expected) in [
+            ("codex", AgentVendor::Codex),
+            ("Claude", AgentVendor::Claude),
+            ("antigravity", AgentVendor::Antigravity),
+            ("gemini", AgentVendor::Antigravity),
+        ] {
+            let parsed = parse_command("/agent", arg, &format!("/agent {arg}")).unwrap();
+            match parsed {
+                ParsedInput::Bridge(BridgeCommand::Agent { vendor }) => {
+                    assert_eq!(vendor, Some(expected));
+                }
+                other => panic!("unexpected agent variant: {other:?}"),
+            }
+        }
+        let error = parse_command("/agent", "gpt", "/agent gpt").unwrap_err();
+        assert!(error.to_string().contains("codex|claude|antigravity"));
+        let help = command_help("/agent", "").unwrap();
+        assert_eq!(
+            help.quick_commands,
+            vec![
+                vec!["/agent codex".to_string(), "/agent claude".to_string()],
+                vec!["/agent antigravity".to_string()],
+            ]
+        );
+        // `/agents` stays a forwarded Codex slash command.
+        assert!(matches!(
+            parse_command("/agents", "", "/agents").unwrap(),
+            ParsedInput::Forward(_)
+        ));
+    }
+
+    #[test]
     fn parses_login_and_logout_commands() {
         let login = parse_command("/login", "", "/login").unwrap();
         match login {
@@ -540,6 +593,7 @@ mod tests {
     fn default_bot_commands_are_parseable() {
         let cases = [
             ("/help", ParsedInputKind::Forward),
+            ("/agent claude", ParsedInputKind::Bridge),
             ("/status", ParsedInputKind::Bridge),
             ("/login", ParsedInputKind::Bridge),
             ("/logout", ParsedInputKind::Bridge),

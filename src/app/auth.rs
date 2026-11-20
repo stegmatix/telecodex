@@ -15,7 +15,11 @@ impl App {
         chat_id: i64,
         thread_id: Option<i64>,
     ) -> Result<bool> {
-        let status = self.shared.codex.auth_status().await?;
+        // Claude and Antigravity CLIs manage their own credentials on the host.
+        if self.active_agent_vendor()? != AgentVendor::Codex {
+            return Ok(true);
+        }
+        let status = self.shared.agents.codex.auth_status().await?;
         if status.authenticated {
             return Ok(true);
         }
@@ -46,7 +50,7 @@ impl App {
     }
 
     pub(super) async fn handle_login_command(&self, message: &Message) -> Result<()> {
-        let status = self.shared.codex.auth_status().await?;
+        let status = self.shared.agents.codex.auth_status().await?;
         if status.authenticated {
             let detail = if status.detail.is_empty() {
                 "Codex is already logged in.".to_string()
@@ -153,7 +157,7 @@ impl App {
         if let Some(pending) = self.shared.pending_codex_login.lock().await.take() {
             pending.cancel.cancel();
         }
-        let detail = self.shared.codex.logout().await?;
+        let detail = self.shared.agents.codex.logout().await?;
         let body = if detail.is_empty() {
             "Codex credentials removed.".to_string()
         } else {
@@ -175,7 +179,7 @@ async fn run_device_auth_login(
     cancel: CancellationToken,
     prompt_tx: oneshot::Sender<Result<crate::codex::CodexDeviceAuthPrompt>>,
 ) -> Result<()> {
-    let mut login = match shared.codex.start_device_auth().await {
+    let mut login = match shared.agents.codex.start_device_auth().await {
         Ok(login) => login,
         Err(error) => {
             let _ = prompt_tx.send(Err(error));
@@ -200,7 +204,7 @@ async fn run_device_auth_login(
             if cancel.is_cancelled() {
                 return Ok(());
             }
-            let status = shared.codex.auth_status().await?;
+            let status = shared.agents.codex.auth_status().await?;
             let body = if status.detail.is_empty() {
                 "Codex login completed.".to_string()
             } else {
