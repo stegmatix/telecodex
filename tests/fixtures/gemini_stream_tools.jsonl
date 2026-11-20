@@ -1,0 +1,11 @@
+{"type": "init", "timestamp": "2026-11-21T00:00:00.000Z", "session_id": "7d4c2b7e-1d3a-4c55-9a0e-2b8f5e0c1a11", "model": "gemini-2.5-pro"}
+{"type": "message", "timestamp": "2026-11-21T00:00:00.000Z", "role": "user", "content": "Run echo hi"}
+{"type": "message", "timestamp": "2026-11-21T00:00:00.000Z", "role": "assistant", "content": "I'll run ", "delta": true}
+{"type": "message", "timestamp": "2026-11-21T00:00:00.000Z", "role": "assistant", "content": "it.", "delta": true}
+{"type": "tool_use", "timestamp": "2026-11-21T00:00:00.000Z", "tool_name": "run_shell_command", "tool_id": "t1", "parameters": {"command": "echo hi"}}
+{"type": "tool_result", "timestamp": "2026-11-21T00:00:00.000Z", "tool_id": "t1", "status": "success", "output": "hi"}
+{"type": "tool_use", "timestamp": "2026-11-21T00:00:00.000Z", "tool_name": "read_file", "tool_id": "t2", "parameters": {"absolute_path": "/missing"}}
+{"type": "tool_result", "timestamp": "2026-11-21T00:00:00.000Z", "tool_id": "t2", "status": "error", "output": "", "error": {"type": "FILE_NOT_FOUND", "message": "File not found: /missing"}}
+{"type": "message", "timestamp": "2026-11-21T00:00:00.000Z", "role": "assistant", "content": "The command ", "delta": true}
+{"type": "message", "timestamp": "2026-11-21T00:00:00.000Z", "role": "assistant", "content": "printed hi.", "delta": true}
+{"type": "result", "timestamp": "2026-11-21T00:00:00.000Z", "status": "success", "stats": {"total_tokens": 120, "input_tokens": 100, "output_tokens": 20, "duration_ms": 1500, "tool_calls": 2}}

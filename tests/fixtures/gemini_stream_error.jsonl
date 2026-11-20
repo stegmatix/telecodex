@@ -1,0 +1,2 @@
+{"type": "error", "timestamp": "2026-11-21T00:00:00.000Z", "severity": "warning", "message": "Approaching quota limit"}
+{"type": "result", "timestamp": "2026-11-21T00:00:00.000Z", "status": "error", "error": {"type": "FatalInputError", "message": "Invalid session identifier \"0199\"."}, "stats": {"total_tokens": 0}}

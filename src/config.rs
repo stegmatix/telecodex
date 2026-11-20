@@ -10,6 +10,10 @@ use serde::Deserialize;
 pub struct Config {
     pub telegram: TelegramConfig,
     pub codex: CodexConfig,
+    #[serde(default = "ClaudeConfig::default_config")]
+    pub claude: ClaudeConfig,
+    #[serde(default = "GeminiConfig::default_config")]
+    pub gemini: GeminiConfig,
     #[serde(default = "default_db_path")]
     pub db_path: PathBuf,
     #[serde(default)]
@@ -83,6 +87,66 @@ pub struct CodexConfig {
     pub import_desktop_history: bool,
     #[serde(default = "default_true")]
     pub import_cli_history: bool,
+}
+
+/// Settings for the Claude Code CLI backend (`claude -p`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClaudeConfig {
+    #[serde(default = "default_claude_binary")]
+    pub binary: PathBuf,
+    pub default_model: Option<String>,
+    #[serde(default = "default_claude_models")]
+    pub models: Vec<String>,
+    /// `--permission-mode` override. When unset it follows the session sandbox:
+    /// danger-full-access -> bypassPermissions, workspace-write -> acceptEdits,
+    /// read-only -> default.
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+impl ClaudeConfig {
+    fn default_config() -> Self {
+        Self {
+            binary: default_claude_binary(),
+            default_model: None,
+            models: default_claude_models(),
+            permission_mode: None,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+/// Settings for the Gemini CLI backend (`gemini --output-format stream-json`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiConfig {
+    #[serde(default = "default_gemini_binary")]
+    pub binary: PathBuf,
+    pub default_model: Option<String>,
+    #[serde(default = "default_gemini_models")]
+    pub models: Vec<String>,
+    /// `--approval-mode` override. When unset it follows the session sandbox:
+    /// danger-full-access -> yolo, workspace-write -> auto_edit,
+    /// read-only -> default.
+    pub approval_mode: Option<String>,
+    /// Pass `--skip-trust` so headless runs work in folders not yet trusted.
+    #[serde(default = "default_true")]
+    pub skip_trust: bool,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+impl GeminiConfig {
+    fn default_config() -> Self {
+        Self {
+            binary: default_gemini_binary(),
+            default_model: None,
+            models: default_gemini_models(),
+            approval_mode: None,
+            skip_trust: true,
+            extra_args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -209,6 +273,10 @@ impl Config {
             bail!("codex.binary must not be empty");
         }
         self.codex.binary = resolve_binary_path(&self.codex.binary)?;
+        // Claude and Gemini are optional backends: a missing binary only fails
+        // the turn that tries to use it, so a Codex-only host keeps starting.
+        self.claude.binary = resolve_optional_binary_path("claude", &self.claude.binary)?;
+        self.gemini.binary = resolve_optional_binary_path("gemini", &self.gemini.binary)?;
 
         Ok(())
     }
@@ -257,6 +325,41 @@ fn default_forum_sync_topics_per_poll() -> usize {
 
 fn default_codex_binary() -> PathBuf {
     PathBuf::from("codex")
+}
+
+fn default_claude_binary() -> PathBuf {
+    PathBuf::from("claude")
+}
+
+fn default_claude_models() -> Vec<String> {
+    ["opus", "sonnet", "haiku"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn default_gemini_binary() -> PathBuf {
+    PathBuf::from("gemini")
+}
+
+fn default_gemini_models() -> Vec<String> {
+    ["gemini-2.5-pro", "gemini-2.5-flash"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn resolve_optional_binary_path(section: &str, input: &Path) -> Result<PathBuf> {
+    if input.as_os_str().is_empty() {
+        bail!("{section}.binary must not be empty");
+    }
+    match resolve_binary_path(input) {
+        Ok(path) => Ok(path),
+        Err(error) => {
+            tracing::warn!("{section} backend unavailable until installed: {error:#}");
+            Ok(input.to_path_buf())
+        }
+    }
 }
 
 fn default_sandbox() -> String {
@@ -423,6 +526,46 @@ mod tests {
                 .as_str(),
             "@sample_user"
         );
+    }
+
+    #[test]
+    fn agent_sections_are_optional_and_backward_compatible() {
+        let config: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "x"
+            [codex]
+            default_cwd = "/tmp"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.claude.binary, PathBuf::from("claude"));
+        assert_eq!(config.claude.models, vec!["opus", "sonnet", "haiku"]);
+        assert_eq!(config.gemini.binary, PathBuf::from("gemini"));
+        assert!(config.claude.permission_mode.is_none());
+
+        let config: Config = toml::from_str(
+            r#"
+            [telegram]
+            bot_token = "x"
+            [codex]
+            default_cwd = "/tmp"
+            [claude]
+            binary = "/home/user/.npm-global/bin/claude"
+            default_model = "opus"
+            permission_mode = "bypassPermissions"
+            [gemini]
+            binary = "/home/user/.npm-global/bin/gemini"
+            models = ["gemini-3-pro"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.claude.default_model.as_deref(), Some("opus"));
+        assert_eq!(
+            config.claude.permission_mode.as_deref(),
+            Some("bypassPermissions")
+        );
+        assert_eq!(config.gemini.models, vec!["gemini-3-pro"]);
     }
 
     #[test]

@@ -935,6 +935,24 @@ pub(super) fn private_topic_link_slug(chat_id: i64) -> Option<i64> {
         .filter(|value| *value > 0)
 }
 
+pub(super) fn format_agent_status_line(
+    vendor: AgentVendor,
+    state: &crate::agent::AgentSessionState,
+    model: Option<String>,
+) -> String {
+    if vendor == AgentVendor::Codex {
+        return "**Agent:** `codex`".to_string();
+    }
+    format!(
+        "**Agent:** `{}`\n- {} session: `{}`\n- {} model: `{}`",
+        vendor.as_str(),
+        vendor.label(),
+        state.thread_id.as_deref().unwrap_or("new"),
+        vendor.label(),
+        model.as_deref().unwrap_or("CLI default")
+    )
+}
+
 pub(super) fn short_codex_thread_id(thread_id: &str) -> String {
     const EDGE: usize = 8;
     if thread_id.len() <= EDGE * 2 + 1 {

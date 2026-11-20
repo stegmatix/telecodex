@@ -132,7 +132,8 @@ High-level flow:
 
 | Command | Purpose |
 | --- | --- |
-| `/new [title]` | Start a fresh Codex session in the current topic/chat |
+| `/agent [codex\|claude\|gemini]` | Show or (admin) switch the global agent CLI used for every chat, topic and voice turn |
+| `/new [title]` | Start a fresh session for the active agent in the current topic/chat |
 | `/topic [title]` | Create a new Telegram topic and copy the current environment into it |
 | `/use <thread_id_prefix\|latest>` | Switch this Telegram session to an existing Codex thread |
 | `/review [--uncommitted] [--base BRANCH] [--commit SHA] [--title TITLE] [prompt]` | Run `codex review`-style flows |
@@ -163,6 +164,16 @@ High-level flow:
 | `/restart_bot` | Admin: restart the bot process |
 
 `/model` accepts any Codex model id. When the live Codex catalog is unavailable, Telecodex still offers quick picks for the latest known ChatGPT/Codex models.
+
+### Agent vendors
+
+Telecodex runs turns through one global agent CLI, chosen with `/agent` and stored in the database (default `codex`):
+
+- `codex`: `codex app-server` (all features).
+- `claude`: `claude -p --output-format stream-json`, prompt on stdin, `--session-id`/`--resume` per chat, session `cwd`, `--append-system-prompt` for the session prompt, `--add-dir` for extra dirs, `--effort` from `/think`.
+- `gemini`: headless `gemini --output-format stream-json`, prompt and instructions on stdin, `--session-id`/`--resume` per chat, `--include-directories` for extra dirs.
+
+Each vendor keeps its own conversation per Telegram session: Claude never sees the Codex conversation, and switching back resumes the previous vendor's conversation. `/new` and `/clear` reset only the active vendor. With Claude or Gemini active, `/model` lists the `models` configured for that vendor and stores the choice per session; `/limits`, `/login`, `/logout` and `/review` are Codex-only and say so. Tool approvals are not relayed for Claude/Gemini: their permission mode follows the session sandbox (see configuration notes).
 
 The example config uses GPT-6 Astra (`gpt-6-astra`) with `xhigh` reasoning. Select it with `/model gpt-6-astra`; `/think max` is also supported. Existing sessions keep their selected model until you change it or run `/model default`.
 
@@ -312,6 +323,18 @@ Telecodex will start `codex login --device-auth`, send a clickable `auth.openai.
 - `codex.default_add_dirs` entries must also be absolute existing directories.
 - `codex.import_desktop_history` and `codex.import_cli_history` control session import sources.
 - `codex.default_search_mode` supports `disabled`, `live`, and `cached`.
+
+### Claude and Gemini
+
+Both sections are optional; a missing binary only fails turns once that vendor is selected.
+
+- `claude.binary` / `gemini.binary`: binary name or absolute path.
+- `default_model`: model used when the session has no `/model` override (unset = CLI default).
+- `models`: quick picks shown by `/model` (defaults: `opus`, `sonnet`, `haiku` / `gemini-2.5-pro`, `gemini-2.5-flash`).
+- `claude.permission_mode`: `--permission-mode` override. By default the session sandbox maps `danger-full-access` → `bypassPermissions`, `workspace-write` → `acceptEdits`, `read-only` → `default`.
+- `gemini.approval_mode`: `--approval-mode` override. Default mapping: `danger-full-access` → `yolo`, `workspace-write` → `auto_edit`, `read-only` → `default`.
+- `gemini.skip_trust` (default `true`): pass `--skip-trust` so headless runs work in untrusted folders.
+- `extra_args`: appended verbatim to every invocation.
 
 ### Environment variables
 

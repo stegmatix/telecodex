@@ -16,7 +16,13 @@ pub(super) async fn process_turn(
         queued.request.from_user_id,
         &shared.session_defaults,
     )?;
-    let session = resolve_session_codex_binding_from_history(&shared, session)?;
+    let vendor = shared.store.agent_vendor()?;
+    let session = if vendor == AgentVendor::Codex {
+        resolve_session_codex_binding_from_history(&shared, session)?
+    } else {
+        session
+    };
+    let agent_state = shared.store.agent_session_state(&session, vendor)?;
     shared.store.set_session_busy(session.key, true)?;
     let turn_id = shared
         .store
@@ -38,15 +44,23 @@ pub(super) async fn process_turn(
             cancel.clone(),
         ))
     };
-    let limits_inline = latest_limits_snapshot_from_shared(&shared)
-        .await
-        .map_err(|error| {
-            tracing::warn!("failed to read latest limits snapshot: {error:#}");
-            error
-        })
-        .ok()
-        .and_then(|snapshot| snapshot.and_then(|snapshot| format_limits_inline(&snapshot)));
-    let turn_banner = turn_start_banner(limits_inline, &session);
+    let limits_inline = if vendor == AgentVendor::Codex {
+        latest_limits_snapshot_from_shared(&shared)
+            .await
+            .map_err(|error| {
+                tracing::warn!("failed to read latest limits snapshot: {error:#}");
+                error
+            })
+            .ok()
+            .and_then(|snapshot| snapshot.and_then(|snapshot| format_limits_inline(&snapshot)))
+    } else {
+        None
+    };
+    let turn_banner = with_agent_banner(
+        turn_start_banner(limits_inline, &session),
+        vendor,
+        effective_agent_model(&shared, vendor, &agent_state),
+    );
     let thinking_text = "⏳";
     let draft_id = turn_id;
     let placeholder_text = render_placeholder_html(thinking_text, turn_banner.as_deref());
@@ -111,61 +125,72 @@ pub(super) async fn process_turn(
     let mut runtime_request = queued.request.clone();
     enrich_audio_transcripts(&shared, &mut runtime_request, &turn_workspace, &sink).await;
     let runtime_request = prepare_runtime_request(&session, &runtime_request, &turn_workspace);
-    let runtime_request = enrich_runtime_request_with_codex_history(&session, runtime_request);
+    let runtime_request = if vendor == AgentVendor::Codex {
+        enrich_runtime_request_with_codex_history(&session, runtime_request)
+    } else {
+        runtime_request
+    };
     let runtime_request =
         enrich_runtime_request_with_context_pressure(&session, runtime_request).await;
 
     let run_result = shared
-        .codex
-        .run_turn(&session, &runtime_request, cancel.clone(), {
-            let sink = sink.clone();
-            let shared = shared.clone();
-            let approval_cancel = cancel.clone();
-            let requester_user_id = queued.request.from_user_id;
-            let session_key = session.key;
-            let approvals_supported = !is_guest_turn;
-            move |event| {
+        .agents
+        .run_turn(
+            vendor,
+            &session,
+            &agent_state,
+            &runtime_request,
+            cancel.clone(),
+            {
                 let sink = sink.clone();
                 let shared = shared.clone();
-                let cancel = approval_cancel.clone();
-                async move {
-                    match event {
-                        CodexEvent::ApprovalRequest(request) => {
-                            if let Err(error) = sink
-                                .lock()
-                                .await
-                                .set_progress(approval_waiting_text(request.kind))
-                                .await
-                            {
-                                tracing::debug!(
-                                    "failed to update approval progress for {:?}: {error:#}",
-                                    session_key
-                                );
+                let approval_cancel = cancel.clone();
+                let requester_user_id = queued.request.from_user_id;
+                let session_key = session.key;
+                let approvals_supported = !is_guest_turn;
+                move |event| {
+                    let sink = sink.clone();
+                    let shared = shared.clone();
+                    let cancel = approval_cancel.clone();
+                    async move {
+                        match event {
+                            CodexEvent::ApprovalRequest(request) => {
+                                if let Err(error) = sink
+                                    .lock()
+                                    .await
+                                    .set_progress(approval_waiting_text(request.kind))
+                                    .await
+                                {
+                                    tracing::debug!(
+                                        "failed to update approval progress for {:?}: {error:#}",
+                                        session_key
+                                    );
+                                }
+                                if !approvals_supported {
+                                    return Ok(CodexEventOutcome::Approval(
+                                        CodexApprovalDecision::Decline,
+                                    ));
+                                }
+                                let decision = request_telegram_approval(
+                                    shared,
+                                    session_key.chat_id,
+                                    Some(session_key.thread_id).filter(|value| *value != 0),
+                                    requester_user_id,
+                                    request,
+                                    cancel,
+                                )
+                                .await?;
+                                Ok(CodexEventOutcome::Approval(decision))
                             }
-                            if !approvals_supported {
-                                return Ok(CodexEventOutcome::Approval(
-                                    CodexApprovalDecision::Decline,
-                                ));
+                            other => {
+                                sink.lock().await.handle_event(other).await?;
+                                Ok(CodexEventOutcome::None)
                             }
-                            let decision = request_telegram_approval(
-                                shared,
-                                session_key.chat_id,
-                                Some(session_key.thread_id).filter(|value| *value != 0),
-                                requester_user_id,
-                                request,
-                                cancel,
-                            )
-                            .await?;
-                            Ok(CodexEventOutcome::Approval(decision))
-                        }
-                        other => {
-                            sink.lock().await.handle_event(other).await?;
-                            Ok(CodexEventOutcome::None)
                         }
                     }
                 }
-            }
-        })
+            },
+        )
         .await;
 
     *cancel_slot.lock().expect("cancel mutex poisoned") = None;
@@ -183,6 +208,7 @@ pub(super) async fn process_turn(
                     ForegroundTurnSuccess {
                         store: &shared.store,
                         session: &session,
+                        vendor,
                         turn_id,
                         review_mode: queued.request.review_mode.is_some(),
                         summary: &summary,
@@ -211,14 +237,15 @@ pub(super) async fn process_turn(
                 };
                 let recovery_note = if should_reset_session_after_error(&error) {
                     tracing::warn!(
-                        "resetting stale Codex thread binding for {:?} after error: {error:#}",
+                        "resetting stale {} conversation binding for {:?} after error: {error:#}",
+                        vendor.label(),
                         session.key
                     );
-                    match shared.store.clear_session_conversation(session.key) {
-                        Ok(()) => Some(
-                            "The saved Codex thread binding for this topic was reset. Retry the same request to start a fresh session."
-                                .to_string(),
-                        ),
+                    match shared.store.clear_agent_conversation(&session, vendor) {
+                        Ok(()) => Some(format!(
+                            "The saved {} conversation for this topic was reset. Retry the same request to start a fresh session.",
+                            vendor.label()
+                        )),
                         Err(clear_error) => {
                             tracing::warn!(
                                 "failed to clear stale session conversation for {:?}: {clear_error:#}",
@@ -335,6 +362,7 @@ pub(super) fn finish_turn_cleanup<T>(
 pub(super) struct ForegroundTurnSuccess<'a> {
     pub(super) store: &'a Store,
     pub(super) session: &'a crate::models::SessionRecord,
+    pub(super) vendor: AgentVendor,
     pub(super) turn_id: i64,
     pub(super) review_mode: bool,
     pub(super) summary: &'a crate::codex::RunSummary,
@@ -363,10 +391,10 @@ where
 {
     let success_result = async {
         if !context.review_mode {
-            if let Some(thread_id) = context.summary.codex_thread_id.as_deref() {
+            if let Some(thread_id) = context.summary.thread_id.as_deref() {
                 context
                     .store
-                    .set_session_codex_thread(context.session.key, thread_id)?;
+                    .set_agent_thread(context.session, context.vendor, Some(thread_id))?;
             }
         }
         context
@@ -531,6 +559,10 @@ pub(super) fn should_reset_session_after_error(error: &anyhow::Error) -> bool {
     let display = error.to_string().to_ascii_lowercase();
     let matches = |text: &str| {
         text.contains("no rollout found for thread id")
+            // Claude/Gemini: the saved conversation is gone or belongs to
+            // another working directory.
+            || text.contains("no conversation found with session id")
+            || text.contains("invalid session identifier")
             || (text.contains("rollout")
                 && text.contains("thread id")
                 && text.contains("code -32600"))
@@ -991,6 +1023,36 @@ fn render_placeholder_html(status: &str, limits_banner: Option<&str>) -> String 
         }
         _ => format!("<i>{status}</i>"),
     }
+}
+
+/// Effective model label for a non-Codex vendor (session override, then config).
+pub(super) fn effective_agent_model(
+    shared: &AppShared,
+    vendor: AgentVendor,
+    state: &crate::agent::AgentSessionState,
+) -> Option<String> {
+    let configured = match vendor {
+        AgentVendor::Codex => None,
+        AgentVendor::Claude => shared.agents.claude.default_model(),
+        AgentVendor::Gemini => shared.agents.gemini.default_model(),
+    };
+    state.model.clone().or(configured.map(str::to_string))
+}
+
+pub(super) fn with_agent_banner(
+    banner: Option<String>,
+    vendor: AgentVendor,
+    model: Option<String>,
+) -> Option<String> {
+    if vendor == AgentVendor::Codex {
+        return banner;
+    }
+    let model = model.unwrap_or_else(|| "default".to_string());
+    let line = format!("🤖 {} · `{model}`", vendor.label());
+    Some(match banner {
+        Some(existing) => format!("{line}\n{existing}"),
+        None => line,
+    })
 }
 
 fn turn_start_banner(
@@ -1669,7 +1731,7 @@ mod tests {
             config: sample_config(path, directory.to_path_buf()),
             store,
             telegram: TelegramClient::new("TEST_TOKEN".into(), api_base),
-            codex: CodexRunner::new(PathBuf::from("codex")),
+            agents: crate::agent::AgentRunners::for_tests(),
             bot_username: None,
             service_user_id: 0,
             transcription_backend: None,

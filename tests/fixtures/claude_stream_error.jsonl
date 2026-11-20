@@ -1,0 +1,1 @@
+{"type": "result", "subtype": "error_during_execution", "duration_ms": 0, "duration_api_ms": 0, "is_error": true, "num_turns": 0, "stop_reason": null, "session_id": "0199", "total_cost_usd": 0, "permission_denials": [], "uuid": "756d575b-0594-4193-886d-55794f483967", "errors": ["No conversation found with session ID: 0199"], "result_index": 0}

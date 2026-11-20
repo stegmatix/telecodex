@@ -18,6 +18,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod agents;
 mod auth;
 mod forum;
 mod io;
@@ -26,9 +27,9 @@ mod support;
 mod turns;
 
 use crate::{
+    agent::{AgentRunners, AgentVendor},
     codex::{
         AvailableModel, CodexApprovalDecision, CodexApprovalKind, CodexEvent, CodexEventOutcome,
-        CodexRunner,
     },
     codex_history::{
         CodexEnvironmentSummary, CodexHistoryEntry, CodexThreadSummary,
@@ -71,7 +72,7 @@ struct AppShared {
     config: Config,
     store: Store,
     telegram: TelegramClient,
-    codex: CodexRunner,
+    agents: AgentRunners,
     bot_username: Option<String>,
     service_user_id: i64,
     transcription_backend: Option<TranscriptionBackend>,
@@ -214,7 +215,7 @@ impl App {
             &config.startup_admin_ids,
             &session_defaults,
         )?;
-        let codex = CodexRunner::new(config.codex.binary.clone());
+        let agents = AgentRunners::from_config(&config);
         let service_user_id = config.startup_admin_ids.first().copied().unwrap_or(0);
 
         Ok(Self {
@@ -222,7 +223,7 @@ impl App {
                 config,
                 store,
                 telegram,
-                codex,
+                agents,
                 bot_username: me.username,
                 service_user_id,
                 transcription_backend,
@@ -487,8 +488,8 @@ impl App {
             return Ok(());
         }
 
-        let auth_status = self.shared.codex.auth_status().await?;
-        if !auth_status.authenticated {
+        let codex_active = self.active_agent_vendor()? == AgentVendor::Codex;
+        if codex_active && !self.shared.agents.codex.auth_status().await?.authenticated {
             self.answer_guest_query_markdown(
                 guest_query_id,
                 "Codex is not logged in. Open a direct chat with the bot and run `/login` first.",
@@ -825,11 +826,18 @@ impl App {
                 self.enqueue_turn(request, &message.chat.kind).await?;
             }
             ParsedInput::Bridge(command) => match command {
+                BridgeCommand::Agent { vendor } => {
+                    self.handle_agent_command(user, message, vendor).await?;
+                }
                 BridgeCommand::Login => {
-                    self.handle_login_command(message).await?;
+                    if !self.reply_if_codex_only(message, "/login").await? {
+                        self.handle_login_command(message).await?;
+                    }
                 }
                 BridgeCommand::Logout => {
-                    self.handle_logout_command(message).await?;
+                    if !self.reply_if_codex_only(message, "/logout").await? {
+                        self.handle_logout_command(message).await?;
+                    }
                 }
                 BridgeCommand::New { title } => {
                     self.handle_new_session(user, message, title).await?;
@@ -894,6 +902,9 @@ impl App {
                     }
                 }
                 BridgeCommand::Review(review) => {
+                    if self.reply_if_codex_only(message, "/review").await? {
+                        return Ok(());
+                    }
                     let request = TurnRequest {
                         session_key,
                         from_user_id: user.tg_user_id,
@@ -1085,10 +1096,21 @@ impl App {
                         .await?;
                     } else {
                         let session = self.ensure_resolved_session(session_key, user.tg_user_id)?;
+                        let vendor = self.active_agent_vendor()?;
+                        let agent_state =
+                            self.shared.store.agent_session_state(&session, vendor)?;
                         self.send_status(
                             message.chat.id,
                             message.message_thread_id,
-                            &format_session_status(&session, &message.chat),
+                            &format!(
+                                "{}\n\n{}",
+                                format_agent_status_line(
+                                    vendor,
+                                    &agent_state,
+                                    effective_agent_model(&self.shared, vendor, &agent_state)
+                                ),
+                                format_session_status(&session, &message.chat)
+                            ),
                         )
                         .await?;
                     }
@@ -1198,7 +1220,11 @@ impl App {
                 }
                 BridgeCommand::Model { model } => {
                     let session = self.ensure_session(session_key, user.tg_user_id)?;
-                    if let Some(model) = model {
+                    let vendor = self.active_agent_vendor()?;
+                    if vendor != AgentVendor::Codex {
+                        self.handle_vendor_model_command(vendor, &session, message, model)
+                            .await?;
+                    } else if let Some(model) = model {
                         let next_model = if model == "-" || model.eq_ignore_ascii_case("default") {
                             self.shared.config.codex.default_model.clone()
                         } else {
@@ -1223,9 +1249,9 @@ impl App {
                             .as_deref()
                             .or(self.shared.config.codex.default_model.as_deref())
                             .unwrap_or("Codex default");
-                        let auth_status = self.shared.codex.auth_status().await?;
+                        let auth_status = self.shared.agents.codex.auth_status().await?;
                         let available_models = if auth_status.authenticated {
-                            match self.shared.codex.read_models().await {
+                            match self.shared.agents.codex.read_models().await {
                                 Ok(models) => models,
                                 Err(error) => {
                                     tracing::warn!(
@@ -1445,9 +1471,12 @@ impl App {
                     .await?;
                 }
                 BridgeCommand::Limits => {
-                    let auth_status = self.shared.codex.auth_status().await?;
+                    if self.reply_if_codex_only(message, "/limits").await? {
+                        return Ok(());
+                    }
+                    let auth_status = self.shared.agents.codex.auth_status().await?;
                     if auth_status.authenticated {
-                        if let Some(snapshot) = self.shared.codex.read_rate_limits().await? {
+                        if let Some(snapshot) = self.shared.agents.codex.read_rate_limits().await? {
                             self.send_status(
                                 message.chat.id,
                                 message.message_thread_id,
@@ -1497,12 +1526,18 @@ impl App {
                     }
                 }
                 BridgeCommand::Clear => {
-                    self.ensure_session(session_key, user.tg_user_id)?;
-                    self.shared.store.clear_session_conversation(session_key)?;
+                    let session = self.ensure_session(session_key, user.tg_user_id)?;
+                    let vendor = self.active_agent_vendor()?;
+                    self.shared
+                        .store
+                        .clear_agent_conversation(&session, vendor)?;
                     self.send_status(
                         message.chat.id,
                         message.message_thread_id,
-                        "This Telegram thread will start a fresh Codex session on the next turn.",
+                        &format!(
+                            "This Telegram thread will start a fresh {} session on the next turn.",
+                            vendor.label()
+                        ),
                     )
                     .await?;
                 }
@@ -1613,7 +1648,10 @@ impl App {
 
         let session_key = SessionKey::new(message.chat.id, message.message_thread_id);
         let session = self.ensure_session(session_key, user.tg_user_id)?;
-        self.shared.store.clear_session_conversation(session_key)?;
+        let vendor = self.active_agent_vendor()?;
+        self.shared
+            .store
+            .clear_agent_conversation(&session, vendor)?;
         if let Some(title) = title
             .as_deref()
             .map(str::trim)
@@ -1627,7 +1665,8 @@ impl App {
             message.chat.id,
             message.message_thread_id,
             &format!(
-                "Fresh Codex session armed for this topic.\ncwd=`{}`",
+                "Fresh {} session armed for this topic.\ncwd=`{}`",
+                vendor.label(),
                 session.cwd.display()
             ),
         )
