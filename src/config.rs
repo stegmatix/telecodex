@@ -330,11 +330,18 @@ fn default_claude_binary() -> PathBuf {
     PathBuf::from("claude")
 }
 
+/// Full model ids so `/model` shows exact versions; the aliases `opus`,
+/// `sonnet` and `haiku` still work but always mean the newest release.
 fn default_claude_models() -> Vec<String> {
-    ["opus", "sonnet", "haiku"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "claude-fable-5-2",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn default_antigravity_binary() -> PathBuf {
@@ -539,7 +546,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.claude.binary, PathBuf::from("claude"));
-        assert_eq!(config.claude.models, vec!["opus", "sonnet", "haiku"]);
+        assert_eq!(
+            config.claude.models,
+            vec![
+                "claude-fable-5-2",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5"
+            ]
+        );
         assert_eq!(config.antigravity.binary, PathBuf::from("agy"));
         assert!(config.claude.permission_mode.is_none());
 
