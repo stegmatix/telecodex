@@ -97,6 +97,11 @@ impl App {
             AgentVendor::Codex => bail!("Codex models are handled by the Codex model picker"),
         };
         let fallback = format!("{} CLI default", vendor.label());
+        let alias_note = if vendor == AgentVendor::Claude {
+            "\n\nShort names (`opus`, `sonnet`, `haiku`) always mean the newest version; pick a full ID such as `claude-opus-5-5` to pin one. Older versions (e.g. `/model claude-opus-5`) work too."
+        } else {
+            ""
+        };
         if let Some(model) = model {
             let next_model = if model == "-" || model.eq_ignore_ascii_case("default") {
                 None
@@ -146,7 +151,7 @@ impl App {
             message.message_thread_id,
             &CommandHelp {
                 text: format!(
-                    "Current {} model: `{current}`\n\nPick one or send `/model <name>` with any model the {} CLI accepts:",
+                    "Current {} model: `{current}`{alias_note}\n\nPick one or send `/model <name>` with any model the {} CLI accepts:",
                     vendor.label(),
                     vendor.label()
                 ),

@@ -330,7 +330,7 @@ Both sections are optional; a missing binary only fails turns once that vendor i
 
 - `claude.binary` / `antigravity.binary` (default `claude` / `agy`): binary name or absolute path.
 - `default_model`: model used when the session has no `/model` override (unset = CLI default).
-- `models`: quick picks for `/model` (Claude: `opus`, `sonnet`, `haiku`; Antigravity uses them only when `agy models` fails).
+- `models`: quick picks for `/model` (Claude: `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; aliases such as `opus` still work and mean the newest version. Antigravity uses `models` only when `agy models` fails).
 - `claude.permission_mode`: `--permission-mode` override. By default the session sandbox maps `danger-full-access` → `bypassPermissions`, `workspace-write` → `acceptEdits`, `read-only` → `default`.
 - `antigravity.permission_mode`: `skip-permissions` (`--dangerously-skip-permissions`), `accept-edits`, `auto`, `plan` (`--mode`) or `default`. Default mapping: `danger-full-access` → `skip-permissions`, `workspace-write` → `accept-edits`, `read-only` → `default`. In `default` mode headless `agy` denies shell commands; a turn whose only result is a denial is reported as failed.
 - `extra_args`: appended verbatim to every invocation.
